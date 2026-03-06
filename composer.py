@@ -10,12 +10,10 @@ from astrbot.api import logger
 TILE_SIZE = 300
 MAX_IMAGE_SIZE = 20 * 1024 * 1024  
 
-# --- 全局 Session 懒加载管理 ---
 _composer_session = None
 _composer_session_lock = None
 
 async def _get_composer_lock():
-    """安全懒加载 asyncio 对象，防止跨循环错误"""
     global _composer_session_lock
     if _composer_session_lock is None:
         _composer_session_lock = asyncio.Lock()
@@ -39,49 +37,38 @@ async def close_composer_session():
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
     async with semaphore:
-        referer = "https://www.google.com/"
-        if 'baidu.com' in url or 'bdimg.com' in url:
-            referer = "https://image.baidu.com/"
-        elif 'duitang.com' in url:
-            referer = "https://www.duitang.com/"
-        elif 'bilibili.com' in url or 'hdslb.com' in url:
-            referer = "https://www.bilibili.com/"
-            
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": referer,
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
         }
-        
         req_timeout = aiohttp.ClientTimeout(total=15, connect=5)
         
         try:
             async with session.get(url, headers=headers, timeout=req_timeout) as resp:
-                if resp.status == 200:
-                    content_type = resp.headers.get('Content-Type', '').lower()
-                    if 'text/html' in content_type:
-                        return None
+                if resp.status != 200:
+                    return None
                     
-                    # 修复：更容错的请求头解析
-                    content_length_str = resp.headers.get('Content-Length', '0')
-                    try:
-                        content_length = int(content_length_str)
-                    except ValueError:
-                        content_length = 0
-                        
-                    if content_length > MAX_IMAGE_SIZE:
-                        logger.warning(f"下载拒绝：目标文件超出安全大小: {url}")
-                        return None
-                        
-                    return await resp.read()
-                return None
+                content_type = resp.headers.get('Content-Type', '').lower()
+                if 'text/html' in content_type:
+                    return None
+                
+                # 🚀 终极防 OOM 截断保护 🚀
+                # 读取 MAX+1 字节，如果超了立马丢弃，防范黑客伪造 Content-Length 或数据流攻击
+                data = await resp.content.read(MAX_IMAGE_SIZE + 1)
+                if len(data) > MAX_IMAGE_SIZE:
+                    logger.warning(f"下载中止：目标文件真实体积超过安全阈值 ({MAX_IMAGE_SIZE} bytes): {url}")
+                    return None
+                    
+                return data
+                
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.debug(f"并发下载时网络连接或超时失败 ({url}): {e}")
+            logger.debug(f"网络连接或超时 ({url}): {e}")
             return None
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"并发下载时发生未知异常 ({url}): {e}")
+            # 🚀 提升异常暴露级别 🚀
+            logger.warning(f"下载图片时发生未预料异常 ({url}): {e}")
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
