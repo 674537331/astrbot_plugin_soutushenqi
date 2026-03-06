@@ -2,15 +2,14 @@
 """
 数据抓取模块
 新增：Bing 必应图片搜索兜底机制。清理了魔法数字，修复了正则标点问题，彻底拉黑百度图床。
+修复：合规化日志，将 Playwright 初始化放入 try 块中防备异常泄漏僵尸进程。
 """
 import re
 import json
 import urllib.parse
 import aiohttp
 from playwright.async_api import async_playwright
-import logging
-
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger  # 修复：使用 AstrBot 官方接管的 logger
 
 # 抽离魔法常量，方便统一修改
 PLAYWRIGHT_TIMEOUT = 15000
@@ -53,24 +52,26 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     """主抓取逻辑：优先尝试搜图神器（严禁百度）。"""
     valid_urls = []
     error_msg = ""
+    browser = None  # 提前声明，防止未初始化时就进入 finally 报错
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox'
-            ]
-        )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
-        page = await context.new_page()
-        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
         try:
+            # 修复：全生命周期移入 try 块，防止 OOM 等异常导致僵尸进程
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = await context.new_page()
+            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
             search_url = f"https://www.soutushenqi.com/image/search?searchWord={urllib.parse.quote(keyword)}"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
             
@@ -118,7 +119,8 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         except Exception as e:
             logger.warning(f"搜图神器 Playwright 抓取异常: {str(e)}")
         finally:
-            await browser.close()
+            if browser:
+                await browser.close()
             
     # 如果没抓到足够的图，也会在 main.py 的逻辑中自动由 Bing 补齐
     return valid_urls[:target_count], error_msg
