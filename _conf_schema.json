@@ -1,0 +1,23 @@
+{
+  "enable_vlm_selection": {
+    "type": "bool",
+    "description": "是否启用大模型智能选图功能（开启后会抓取多图拼合，耗时较长）",
+    "default": true
+  },
+  "vlm_provider_id": {
+    "type": "string",
+    "description": "用于图片理解（VLM）的 Provider。留空则使用当前对话默认模型。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "batch_size": {
+    "type": "int",
+    "description": "单次交给模型挑选的图片数量。建议设为 9 (3x3 网格)。",
+    "default": 9
+  },
+  "default_scrape_count": {
+    "type": "int",
+    "description": "默认从搜图神器抓取的候选图总数。",
+    "default": 9
+  }
+}
