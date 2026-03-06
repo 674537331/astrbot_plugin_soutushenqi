@@ -2,7 +2,7 @@
 """
 搜图神器插件总线
 实现自然语言搜图、VLM 淘汰比对机制，及基于上下文的实体解释附图功能。
-包含健全的单图下载重试容错机制。
+包含健全的单图下载重试容错机制，并修复了底层的 MessageChain 报错。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -34,7 +34,6 @@ class SouTuShenQiPlugin(Star):
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
         """统筹搜图与下载流程。针对单图模式实现下载失败自动重试下一个链接的功能。"""
-        # 为保证容错率，统一抓取批量候选链接
         batch_size = self.config.get("batch_size", 9)
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}, 候选池大小: {batch_size}")
         
@@ -79,7 +78,7 @@ class SouTuShenQiPlugin(Star):
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
         """手动调用的搜图指令"""
-        use_vlm = self.config.get("enable_vlm_selection", True)
+        use_vlm = self.config.get("enable_cmd_vlm_selection", True)
         yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
         
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
@@ -90,21 +89,27 @@ class SouTuShenQiPlugin(Star):
             yield event.plain_result(f"搜图失败: {err_msg}")
 
     @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(self, event: AstrMessageEvent, keyword: str):
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, is_explanation: bool = False):
         """
-        当用户询问实体对象时调用的搜图工具。
+        当用户明确要求搜索图片，或者询问某个实体对象是什么时调用的工具。
         
         Args:
             keyword(string): 需搜索的实体关键词。
+            is_explanation(boolean): 若用户明确指令你“搜一张图”，填 False；若用户是在询问“什么是XX”，你需要为其配图解释，则必须填 True。
         """
-        use_vlm = self.config.get("enable_explanation_vlm_selection", False)
+        # 核心解耦逻辑：根据大模型识别的意图，走不同的配置开关
+        if is_explanation:
+            use_vlm = self.config.get("enable_explanation_vlm_selection", False)
+        else:
+            use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
+            
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
         
         if img_bytes:
-            await event.send(event.chain_result([Comp.Image.fromBytes(img_bytes)]).chain)
-            return "图片已成功发送给用户。"
+            yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
+            yield event.plain_result("图片提取成功，已发送给用户。")
         else:
-            return f"系统工具搜图失败: {err_msg}"
+            yield event.plain_result(f"系统工具搜图失败: {err_msg}")
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -113,7 +118,7 @@ class SouTuShenQiPlugin(Star):
             instruction = (
                 "\n【重要指令：实体解释配图】\n"
                 "当用户询问具体的、可视化的实体对象（如装备、动物、人物、建筑等）是什么时，"
-                "你必须调用 `search_image_tool` 工具搜索并发送该实体的图片。"
+                "你必须调用 `search_image_tool` 工具搜索并发送该实体的图片，同时记得将 `is_explanation` 参数设为 true。"
                 "严禁使用 astrbot_execute_ipython 或自行编写代码执行搜索。"
                 "若用户询问抽象概念或理论知识，请勿调用此工具。"
             )
