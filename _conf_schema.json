@@ -1,8 +1,23 @@
 {
-  "enable_vlm_selection": {
+  "enable_cmd_vlm_selection": {
     "type": "bool",
-    "description": "主动搜图指令(/搜图)是否启用大模型淘汰比对功能",
+    "description": "【指令搜图】(/搜图) 是否启用大模型淘汰比对",
     "default": true
+  },
+  "enable_nl_search_vlm_selection": {
+    "type": "bool",
+    "description": "【自然语言搜图】(如“帮我搜张图”) 是否启用大模型淘汰比对",
+    "default": true
+  },
+  "enable_explanation_image": {
+    "type": "bool",
+    "description": "【解释附图】是否启用功能（解答明确实体时自动配图）",
+    "default": true
+  },
+  "enable_explanation_vlm_selection": {
+    "type": "bool",
+    "description": "【解释附图】是否启用大模型淘汰比对",
+    "default": false
   },
   "vlm_provider_id": {
     "type": "string",
@@ -12,17 +27,7 @@
   },
   "batch_size": {
     "type": "int",
-    "description": "每轮单批次处理的图片数量（建议设置为 4 或 9，便于拼合网格）",
+    "description": "单批次抓取的候选图片数量（建议设置为 4 或 9）。此参数同时决定单图模式下的最大重试次数。",
     "default": 9
-  },
-  "enable_explanation_image": {
-    "type": "bool",
-    "description": "是否启用“解释附图”功能（解答明确实体时自动配图，抽象概念不触发）",
-    "default": true
-  },
-  "enable_explanation_vlm_selection": {
-    "type": "bool",
-    "description": "“解释附图”功能是否启用大模型淘汰比对（关闭则直接取搜索结果的第一张图）",
-    "default": false
   }
 }
