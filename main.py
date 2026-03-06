@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 搜图神器插件总线
-实现自然语言搜图、VLM 淘汰比对机制，及基于上下文的实体解释附图功能。
-包含健全的单图下载重试容错机制及 Bing 兜底策略。
+包含了优雅的 Bing 混合补充机制。当主图库下载存活率 < 30% 时，无缝混入 Bing 搜图进行同台淘汰比对。
+极大地减少了冗余的重复下载，提升响应速度。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -10,8 +10,8 @@ from astrbot.api.provider import ProviderRequest
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
-from .scraper import fetch_image_urls
-from .composer import download_image, create_collage
+from .scraper import fetch_image_urls, fetch_bing_image_urls
+from .composer import download_image_batch, create_collage_from_items
 from .vlm import select_best_image_index
 
 @register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件", "v2.0.0")
@@ -33,56 +33,66 @@ class SouTuShenQiPlugin(Star):
         return self.context.get_provider_by_id(curr_id)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
-        """统筹搜图与下载流程。针对单图模式实现下载失败自动重试下一个链接的功能。"""
+        """包含 Bing 混合补充机制的顶层管线"""
         batch_size = self.config.get("batch_size", 9)
-        logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}, 候选池大小: {batch_size}")
+        threshold = batch_size * 0.3  # 计算 30% 的阈值，例如 9 * 0.3 = 2.7
+        logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}, 补充阈值: {threshold}")
         
+        # 1. 主源抓取与并发下载
         urls, error_msg = await fetch_image_urls(keyword, batch_size)
-        if not urls:
-            return None, f"抓取阶段失败: {error_msg}"
-            
-        logger.info(f"抓取完成，共提取 {len(urls)} 个候选链接。")
+        items = await download_image_batch(urls)
+        logger.info(f"主来源下载完成，实际存活 {len(items)} 张。")
 
-        # --- 模式 A: 启用 VLM 淘汰比对 ---
-        if use_vlm_selection and len(urls) > 1:
+        # 2. 【核心优化】：存活率低于 30%，触发 Bing 混合补充！
+        if len(items) < threshold:
+            logger.warning(f"主图床可用率过低 ({len(items)}/{batch_size})，自动调用 Bing 图库进行混合补充...")
+            bing_urls = await fetch_bing_image_urls(keyword, batch_size)
+            bing_items = await download_image_batch(bing_urls)
+            
+            # 去重合并
+            seen_urls = {u for u, _ in items}
+            for u, b in bing_items:
+                if u not in seen_urls:
+                    items.append((u, b))
+                    seen_urls.add(u)
+            
+            # 截断到允许的最大网格数
+            items = items[:batch_size]
+            logger.info(f"混合补充完毕，最终参与比对的总存活图片数: {len(items)}")
+
+        if not items:
+            return None, "所有的图片渠道均触发强力防盗链或失效，无一可用。"
+
+        # 3. 模式 A: 启用 VLM 淘汰比对
+        if use_vlm_selection and len(items) > 1:
+            collage_bytes, valid_items = await create_collage_from_items(items)
+            if not collage_bytes or not valid_items:
+                return None, "图片拼合处理失败，可用图片的数据均已损坏。"
+                
             vlm_provider = await self._get_vlm_provider(event)
-            if not vlm_provider:
-                return None, "VLM比对失败：未获取到模型。"
-                
-            collage_bytes, successful_urls = await create_collage(urls)
-            if not collage_bytes or not successful_urls:
-                return None, "图片比对失败：所有候选图均无法下载(可能全部触发防盗链)。"
-                
-            best_idx = await select_best_image_index(vlm_provider, collage_bytes, keyword, len(successful_urls))
-            final_url = successful_urls[best_idx]
-            logger.info(f"VLM选中图片: {final_url}")
-            
-            img_bytes = await download_image(final_url)
-            if img_bytes:
-                return img_bytes, ""
-            return None, f"VLM选中的图片由于网络原因下载失败: {final_url}"
+            if vlm_provider:
+                logger.info(f"开始大模型淘汰比对 ({len(valid_items)} 选 1)...")
+                best_idx = await select_best_image_index(vlm_provider, collage_bytes, keyword, len(valid_items))
+                final_url, final_bytes = valid_items[best_idx]
+                logger.info(f"VLM优胜决定：{final_url}")
+                return final_bytes, ""  # 【省时魔法】直接提取内存里的 bytes，不再二次下载！
+            else:
+                final_url, final_bytes = valid_items[0]
+                logger.warning(f"未获取到 VLM 模型，直接返回补充后的第一张可用图。")
+                return final_bytes, ""
 
-        # --- 模式 B: 单图模式 (按序重试) ---
+        # 4. 模式 B: 单图模式 (跳过淘汰，直接发首图)
         else:
-            logger.info("采用单图模式，开始顺序尝试下载...")
-            for idx, url in enumerate(urls):
-                img_bytes = await download_image(url)
-                if img_bytes:
-                    logger.info(f"顺序尝试成功：第 {idx + 1} 张图片下载完成。")
-                    return img_bytes, ""
-                else:
-                    logger.warning(f"顺序尝试：第 {idx + 1} 张图片下载失败，尝试下一张...")
-            
-            return None, "抓取到的所有图片均下载失败（均被源站拦截或超时）。"
+            final_url, final_bytes = items[0]
+            logger.info(f"单图模式或候选不足，直接返回首张存活图: {final_url}")
+            return final_bytes, ""
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
-        """手动调用的搜图指令"""
         use_vlm = self.config.get("enable_cmd_vlm_selection", True)
         yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
         
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
-        
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
@@ -90,14 +100,6 @@ class SouTuShenQiPlugin(Star):
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str, is_explanation: bool = False):
-        """
-        当用户明确要求搜索图片，或者询问某个实体对象是什么时调用的工具。
-        
-        Args:
-            keyword(string): 需搜索的实体关键词。
-            is_explanation(boolean): 区分场景！若用户明确指令你“搜图/看图”，填 False；若用户在疑问“什么是XX/介绍XX”，需要你配图科普，填 True。
-        """
-        # 这里严格根据 LLM 解析出的意图，去读取你后台设置的对应开关！
         if is_explanation:
             use_vlm = self.config.get("enable_explanation_vlm_selection", False)
         else:
@@ -118,7 +120,6 @@ class SouTuShenQiPlugin(Star):
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
-        """事件钩子：注入极其严格的实体配图指令"""
         if self.config.get("enable_explanation_image", True):
             instruction = (
                 "\n【核心工具调用规范：search_image_tool】\n"
