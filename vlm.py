@@ -7,7 +7,6 @@ import base64
 import json
 import re
 import logging
-from typing import Optional
 from astrbot.api.provider import Provider
 
 logger = logging.getLogger("astrbot")
@@ -17,7 +16,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, ke
     请求 VLM 选出最符合 keyword 的图片编号。
     
     Returns:
-        int: 选中的图片索引 (0-based)。如果解析失败则返回 0。
+        int: 基于 0 的图片索引。如果解析失败则返回 0（降级选择第一张）。
     """
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
     image_url = f"base64://{base64_str}"
@@ -47,7 +46,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, ke
             if 1 <= index <= total_count:
                 return index - 1
                 
-        # 降级：使用正则提取纯数字
+        # 降级策略：如果模型没有返回规范 JSON，尝试用正则提取第一个数字
         numbers = re.findall(r'\d+', result_text)
         if numbers:
             index = int(numbers[0])
@@ -57,4 +56,4 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, ke
     except Exception as e:
         logger.error(f"VLM 选择过程发生异常: {e}")
         
-    return 0  # 发生任何错误时，默认降级返回第一张图
+    return 0
