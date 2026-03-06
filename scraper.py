@@ -13,28 +13,32 @@ SCROLL_WAIT = 1000
 # 全局浏览器单例管理
 _playwright_mgr = None
 _browser: Browser = None
+# 修复：引入异步锁，防止高并发时的初始化条件竞争 (Race Condition)
+_browser_lock = asyncio.Lock()
 
 async def get_browser() -> Browser:
     global _playwright_mgr, _browser
-    if _browser is None:
-        logger.info("初始化全局 Playwright 浏览器实例 (长生命周期)...")
-        _playwright_mgr = await async_playwright().start()
-        _browser = await _playwright_mgr.chromium.launch(
-            headless=True,
-            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
-        )
+    async with _browser_lock:
+        if _browser is None:
+            logger.info("初始化全局 Playwright 浏览器实例 (长生命周期)...")
+            _playwright_mgr = await async_playwright().start()
+            _browser = await _playwright_mgr.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+            )
     return _browser
 
 async def close_browser():
     """安全清理浏览器实例（由 main.py 卸载时调用）"""
     global _playwright_mgr, _browser
-    if _browser:
-        await _browser.close()
-        _browser = None
-    if _playwright_mgr:
-        await _playwright_mgr.stop()
-        _playwright_mgr = None
-    logger.info("已彻底清理全局 Playwright 浏览器实例。")
+    async with _browser_lock:
+        if _browser:
+            await _browser.close()
+            _browser = None
+        if _playwright_mgr:
+            await _playwright_mgr.stop()
+            _playwright_mgr = None
+        logger.info("已彻底清理全局 Playwright 浏览器实例。")
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     headers = {
@@ -101,6 +105,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                 except PlaywrightTimeoutError:
                     pass
                 
+                # 保留强大的页面全量正则扫描，因为众多站点图片隐藏在 CSS 乃至属性 data-src 内
                 html_content = await page.content()
                 raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
                 
