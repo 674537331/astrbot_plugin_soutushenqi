@@ -95,7 +95,7 @@ astrbot_plugin_soutushenqi/
 ├── scraper.py          # 数据抓取模块（Playwright 抓取 + Bing 兜底提取）
 ├── composer.py         # 图像处理模块（防盗链穿透 + 并发下载 + 内存拼图）
 └── vlm.py              # 模型交互模块（Prompt 构建与 JSON 解析兜底）
-
+```
 
 🤝 致谢与贡献
 如果您在使用中遇到了变态级的图床防盗链，欢迎提交 Issue 补充规则，或提交 Pull Request。
