@@ -16,58 +16,45 @@ class SouTuShenQiPlugin(Star):
 
     async def _get_image_url_from_web(self, keyword: str) -> str:
         """
-        核心逻辑：使用 Playwright 后台打开网页，搜索并抓取第一张高清图链接
+        核心逻辑：使用 Playwright 访问搜索结果，并直接从超链接参数中截获高清原图直链
         """
         async with async_playwright() as p:
-            # 启动无头浏览器
+            # 启动无头浏览器 (headless=True 确保在后台静默运行)
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
             try:
+                # 访问搜索结果页
                 search_url = f"https://www.soutushenqi.com/image/search?searchWord={keyword}"
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
                 
-                # 【策略升级1：强制等待 + 模拟真实用户滚动】
-                # 等待3秒，确保前端的 Ajax 请求已发送并返回
-                await page.wait_for_timeout(3000)
-                # 模拟鼠标向下滚动 1000 像素，强行触发网页的懒加载机制
-                await page.evaluate("window.scrollBy(0, 1000)")
-                # 给图片一点渲染时间
-                await page.wait_for_timeout(1500)
+                # 【绝杀策略】
+                # 我们不再傻等 <img> 标签加载完毕，而是直接寻找带有 'largeUrl' 参数的超链接 <a>
+                # 这 100% 是真实的搜索结果，且速度极快
+                await page.wait_for_selector('a[href*="largeUrl="]', timeout=15000)
                 
-                # 【策略升级2：全面提取 src 和 data-src】
-                img_srcs = await page.evaluate('''() => {
-                    const imgs = Array.from(document.querySelectorAll("img"));
-                    return imgs.map(img => {
-                        // 很多网站真实图片藏在 data-src 等自定义属性里
-                        return img.getAttribute("data-src") || img.getAttribute("data-original") || img.src;
-                    }).filter(src => src && src.startsWith("http"));
+                # 利用 JS 直接从 a 标签的 href 中解析出 largeUrl 的值（也就是高清原图直链）
+                hd_urls = await page.evaluate('''() => {
+                    const links = Array.from(document.querySelectorAll('a[href*="largeUrl="]'));
+                    return links.map(a => {
+                        try {
+                            // 使用 URL 对象自动解析并解码 URL 参数 (例如将 %3A%2F%2F 还原为 ://)
+                            const urlObj = new URL(a.href, window.location.origin);
+                            return urlObj.searchParams.get("largeUrl");
+                        } catch (e) {
+                            return null;
+                        }
+                    }).filter(url => url && url.startsWith("http"));
                 }''')
                 
-                # 过滤掉不需要的 UI 元素小图
-                valid_urls = [
-                    src for src in img_srcs 
-                    if 'avatar' not in src 
-                    and 'logo' not in src.lower()
-                    and 'qrcode' not in src.lower()
-                    and 'icon' not in src.lower()
-                ]
-                
-                # 优先寻找外链图片（即真正的第三方壁纸图）
-                third_party_urls = [src for src in valid_urls if 'soutushenqi.com' not in src]
-                
-                # 如果有第三方外链图，优先用；实在没有，再用站内的
-                final_urls = third_party_urls if third_party_urls else valid_urls
-                
-                if not final_urls:
-                    logger.warning(f"最终未能提取到壁纸 URL。抓取到的原始链接有: {img_srcs[:5]}")
+                if not hd_urls:
+                    logger.warning("页面加载成功，但未能从超链接中提取到 largeUrl 参数。")
                     return ""
                     
-                # 拿到第一张有效图，并去除缩略图后缀 (例如 @1192w.webp) 还原高清大图
-                raw_url = final_urls[0]
-                hd_url = raw_url.split('@')[0]
+                # 拿到第一张原图
+                hd_url = hd_urls[0]
                 
-                logger.info(f"成功获取高清原图链接: {hd_url}")
+                logger.info(f"【完美破局】直接从链接参数中截获高清原图: {hd_url}")
                 return hd_url
                 
             except Exception as e:
@@ -85,8 +72,9 @@ class SouTuShenQiPlugin(Star):
             "Referer": "https://www.soutushenqi.com/"
         }
         try:
+            # 增加超时时间以应对超大高清图的下载
             async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=10) as resp:
+                async with session.get(url, timeout=20) as resp:
                     if resp.status == 200:
                         return await resp.read()
                     else:
@@ -102,7 +90,7 @@ class SouTuShenQiPlugin(Star):
         """
         yield event.plain_result(f"🔍 正在前往搜图神器寻找【{keyword}】的高清图片，请稍等片刻...")
         
-        # 1. 获取图片 URL
+        # 1. 极速获取图片 URL
         hd_url = await self._get_image_url_from_web(keyword)
         if not hd_url:
             yield event.plain_result("😭 抱歉，没有找到相关图片或请求超时。")
@@ -113,12 +101,12 @@ class SouTuShenQiPlugin(Star):
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"图片下载失败，但你可以直接点击链接查看原图：\n{hd_url}")
+            yield event.plain_result(f"图片下载失败，可能因原图体积过大或源站防盗链拦截。你可以直接点击链接查看原图：\n{hd_url}")
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str):
         """
-        根据用户的视觉需求，搜索一张最匹配的高清图片。
+        根据用户的视觉需求，在网络上搜索一张最匹配的高清图片并发送。
 
         Args:
             keyword(string): 必需参数。搜索关键词，例如“赛博朋克 城市”、“可爱 猫咪”、“BMPT坦克”等。
@@ -127,11 +115,11 @@ class SouTuShenQiPlugin(Star):
         
         hd_url = await self._get_image_url_from_web(keyword)
         if not hd_url:
-            yield event.plain_result("搜索图片失败，请告知用户没有找到图片。")
+            yield event.plain_result(f"搜索图片失败，请告知用户没有找到关于“{keyword}”的图片。")
             return
             
         img_bytes = await self._download_to_memory(hd_url)
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"获取到了图片链接: {hd_url}")
+            yield event.plain_result(f"已获取到图片链接，但下载失败: {hd_url}")
