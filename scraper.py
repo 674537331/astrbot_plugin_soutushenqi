@@ -58,6 +58,10 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     if not u.startswith("http"): continue
                     if 'soutushenqi.com' in u: continue
                     
+                    # 【核心修改】：彻底拉黑百度的毒瘤防盗链图床
+                    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
+                        continue
+                    
                     low_u = u.lower()
                     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
                         continue
@@ -75,7 +79,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     break
 
             if not valid_urls:
-                error_msg = "未能匹配到符合白名单规则的第三方图片URL。"
+                error_msg = "未能匹配到符合白名单规则的第三方图片URL（已排除防盗链极强的百度系图床）。"
                 
         except Exception as e:
             error_msg = f"Playwright 抓取异常: {str(e)}"
