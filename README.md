@@ -108,6 +108,7 @@ astrbot_plugin_soutushenqi/
 ## 🤝 致谢
 
 * [@RC-CHN](https://github.com/RC-CHN) -  `astrbot_plugin_pic_search` 架构灵感
+* Gemini3.1 Pro完成代码构建
 
 
 ## 📄 许可证
