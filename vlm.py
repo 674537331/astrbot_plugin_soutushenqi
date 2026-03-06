@@ -12,12 +12,15 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
     image_url = f"base64://{base64_str}"
 
+    # 🚀 截断恶意超长输入，防范 Prompt 注入和 Token 爆炸 🚀
+    safe_desc = description[:300].replace('```', '')
+
     prompt = textwrap.dedent(f"""
         这是一张包含了 {total_count} 张图片的拼图网格，每张图片左上角都有一个数字编号。
-        请仔细观察，并根据视觉需求描述：“{description}”，选出最符合要求的一张图片。
+        请仔细观察，并根据视觉需求描述：“{safe_desc}”，选出最符合要求的一张图片。
         
         【重要规则】
-        1. 如果没有任何图片与“{description}”相关，请严格返回 0。
+        1. 如果没有任何图片与“{safe_desc}”相关，请严格返回 0。
         2. 如果有符合的，请返回对应的数字编号。
         
         你必须且只能返回一个纯净的 JSON 对象，包含 "best_index" 键。
@@ -35,7 +38,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
             
             if getattr(response, 'result_chain', None) is None:
-                raise ValueError("VLM Provider 发生故障，返回了无效或为空的响应对象。")
+                raise ValueError("VLM Provider 发生故障，返回了无效的响应。")
                 
             result_text = response.result_chain.get_plain_text().strip()
             
@@ -44,42 +47,42 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 data = json.loads(clean_text)
                 index = int(data.get("best_index", 1))
                 
-                if index == 0:
-                    return -1 
-                if 1 <= index <= total_count:
-                    return index - 1
-                raise ValueError(f"JSON 提取的序号 {index} 超出有效范围 0-{total_count}")
+                if index == 0: return -1 
+                if 1 <= index <= total_count: return index - 1
+                raise ValueError(f"JSON 提取的序号 {index} 越界")
                 
             except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败: {e}, 原始内容片段: {result_text}")
+                logger.debug(f"VLM JSON 解析失败: {e}")
                     
             fallback_match = re.search(r'(?:"best_index"\s*:\s*)(\d+)', result_text)
             if fallback_match:
                 index = int(fallback_match.group(1))
-                if index == 0:
-                    return -1
-                if 1 <= index <= total_count:
-                    return index - 1
-                raise ValueError(f"降级提取的序号 {index} 超出有效范围 0-{total_count}")
+                if index == 0: return -1
+                if 1 <= index <= total_count: return index - 1
+                raise ValueError(f"降级提取的序号 {index} 越界")
             else:
                 numbers = re.findall(r'(?<!\d)\d+(?!\d)', result_text)
                 if numbers:
                     for n_str in reversed(numbers):
                         candidate = int(n_str)
                         if 0 <= candidate <= total_count:
-                            if candidate == 0:
-                                return -1
+                            if candidate == 0: return -1
                             return candidate - 1
-                    raise ValueError(f"提取到的所有数字均不在有效范围 0-{total_count} 内")
+                    raise ValueError("提取的数字全部越界")
                 else:
-                    raise ValueError(f"无法从大模型回复中提取任何合法序号。原始内容: {result_text}")
+                    raise ValueError("无法提取任何合法序号")
                     
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"VLM 选择过程发生异常 (尝试 {attempt + 1}/{retries}): {e}")
+            err_msg = str(e).lower()
+            # 🚀 智能拦截：遇到权限、额度、封禁等不可逆错误时，拒绝盲目重试 🚀
+            if any(k in err_msg for k in ["api key", "unauthorized", "blocked", "safety", "quota"]):
+                logger.error(f"遭遇不可逆的模型 API 拒绝服务，放弃重试: {e}")
+                break
+                
+            logger.warning(f"VLM 选择异常 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                # 修复：引入带 Jitter 的指数退避，应对 API 限流 (Rate Limit) 拥堵
                 base_sleep = 2 ** attempt
                 jitter = random.uniform(0, 1)
                 await asyncio.sleep(base_sleep + jitter)
