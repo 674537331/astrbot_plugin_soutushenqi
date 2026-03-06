@@ -2,7 +2,7 @@
 """
 搜图神器插件总线
 实现自然语言搜图、VLM 淘汰比对机制，及基于上下文的实体解释附图功能。
-包含健全的单图下载重试容错机制，并彻底修复了工具拦截大模型回复的问题。
+包含健全的单图下载重试容错机制及 Bing 兜底策略。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -77,7 +77,7 @@ class SouTuShenQiPlugin(Star):
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
-        """手动调用的搜图指令（指令模式下直接 yield 即可，无 LLM 介入）"""
+        """手动调用的搜图指令"""
         use_vlm = self.config.get("enable_cmd_vlm_selection", True)
         yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
         
@@ -95,8 +95,9 @@ class SouTuShenQiPlugin(Star):
         
         Args:
             keyword(string): 需搜索的实体关键词。
-            is_explanation(boolean): 若用户明确指令你“搜一张图”，填 False；若用户是在询问“什么是XX”，你需要为其配图解释，则必须填 True。
+            is_explanation(boolean): 区分场景！若用户明确指令你“搜图/看图”，填 False；若用户在疑问“什么是XX/介绍XX”，需要你配图科普，填 True。
         """
+        # 这里严格根据 LLM 解析出的意图，去读取你后台设置的对应开关！
         if is_explanation:
             use_vlm = self.config.get("enable_explanation_vlm_selection", False)
         else:
@@ -105,27 +106,25 @@ class SouTuShenQiPlugin(Star):
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
         
         if img_bytes:
-            # 核心修复：直接将 event.chain_result 传入 send，绝不报错
             result_obj = event.chain_result([Comp.Image.fromBytes(img_bytes)])
             await event.send(result_obj)
             
-            # 使用 return 引导大模型继续接管会话，输出文字
             if is_explanation:
-                return f"图片已成功提取并直接发送给用户了！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
+                return f"图片已成功发送给用户！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
             else:
-                return "图片已成功提取并直接发送给用户了！你可以简单回复一句搜图完成的话语。"
+                return "图片已成功发送给用户！你可以简单回复一句搜图完成的话语。"
         else:
             return f"系统工具搜图失败: {err_msg}。请向用户致歉并仅提供文字回复。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
-        """事件钩子：注入实体解释配图的强制指令"""
+        """事件钩子：注入极其严格的实体配图指令"""
         if self.config.get("enable_explanation_image", True):
             instruction = (
-                "\n【重要指令：实体解释配图】\n"
-                "当用户询问具体的、可视化的实体对象（如装备、动物、人物、建筑等）是什么时，"
-                "你必须调用 `search_image_tool` 工具搜索并发送该实体的图片，同时记得将 `is_explanation` 参数设为 true。"
-                "严禁使用 astrbot_execute_ipython 或自行编写代码执行搜索。"
-                "若用户询问抽象概念或理论知识，请勿调用此工具。"
+                "\n【核心工具调用规范：search_image_tool】\n"
+                "你必须极其严格地判断用户意图，正确设置 `is_explanation` 参数：\n"
+                "1. 若用户的原话是明确的搜图祈使句（如：“帮我搜一张图”、“找张XX的图片”、“给我看XX”），你必须将 `is_explanation` 设置为 false！\n"
+                "2. 若用户的原话是疑问句，在问你某个客观实体是什么（如：“歼20是什么？”、“介绍一下XX”），你为了辅助科普去搜图时，才将 `is_explanation` 设置为 true！\n"
+                "3. 严禁对抽象概念搜图。严禁使用 astrbot_execute_ipython 编写代码搜图，必须且只能调用 `search_image_tool`！"
             )
             req.system_prompt += instruction
