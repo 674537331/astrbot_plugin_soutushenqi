@@ -71,21 +71,21 @@
 * `/搜图 最终幻想14`
 * `/搜图 歼20高清壁纸`
 
-![指令模式示例](https://github.com/674537331/astrbot_plugin_soutushenqi/tree/main/assets/demo_cmd.jpg)
+![指令模式示例](https://raw.githubusercontent.com/674537331/astrbot_plugin_soutushenqi/main/assets/demo_cmd.jpg)
 
 ### 2. 自然语言模式 (智能)
 无需命令，像和朋友聊天一样提出需求：
 * *“帮我找一张初音未来的壁纸”*
 * *“给我看看长城长什么样”*
 
-![自然语言模式示例](https://github.com/674537331/astrbot_plugin_soutushenqi/tree/main/assets/demo_nl.jpg)
+![自然语言模式示例](https://raw.githubusercontent.com/674537331/astrbot_plugin_soutushenqi/main/assets/demo_nl.jpg)
 
 ### 3. 百科配图模式 (科普)
 触发“What is”类问题时，图文并茂：
 * **用户**：*“歼35战斗机是什么？介绍一下”*
 * **Bot**：*(发送歼35高清图)* + *"歼35是咱家自研的新型隐身战斗机，也就是空军刚官宣不久的五代机，具备卓越的隐身性能......"*
 
-![百科配图模式示例](https://github.com/674537331/astrbot_plugin_soutushenqi/tree/main/assets/demo_wiki.jpg)
+![百科配图模式示例](https://raw.githubusercontent.com/674537331/astrbot_plugin_soutushenqi/main/assets/demo_wiki.jpg)
 
 ---
 
