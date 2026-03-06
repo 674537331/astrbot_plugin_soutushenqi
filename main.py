@@ -2,7 +2,7 @@
 """
 搜图神器插件总线
 实现自然语言搜图、VLM 淘汰比对机制，及基于上下文的实体解释附图功能。
-包含健全的单图下载重试容错机制，并修复了底层的 MessageChain 报错。
+包含健全的单图下载重试容错机制，并彻底修复了工具拦截大模型回复的问题。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -77,7 +77,7 @@ class SouTuShenQiPlugin(Star):
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
-        """手动调用的搜图指令"""
+        """手动调用的搜图指令（指令模式下直接 yield 即可，无 LLM 介入）"""
         use_vlm = self.config.get("enable_cmd_vlm_selection", True)
         yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
         
@@ -105,11 +105,11 @@ class SouTuShenQiPlugin(Star):
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
         
         if img_bytes:
-            # 核心修复：使用 MessageChain 和 await event.send 发送图片，保持函数的 return 能力
-            chain = Comp.MessageChain([Comp.Image.fromBytes(img_bytes)])
-            await event.send(chain)
+            # 核心修复：直接将 event.chain_result 传入 send，绝不报错
+            result_obj = event.chain_result([Comp.Image.fromBytes(img_bytes)])
+            await event.send(result_obj)
             
-            # 使用 return 将状态喂给大模型，引导大模型继续输出文字
+            # 使用 return 引导大模型继续接管会话，输出文字
             if is_explanation:
                 return f"图片已成功提取并直接发送给用户了！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
             else:
