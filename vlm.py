@@ -4,6 +4,7 @@ import json
 import re
 import textwrap
 import asyncio
+import random
 from astrbot.api.provider import Provider
 from astrbot.api import logger
 
@@ -33,8 +34,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         try:
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
             
-            # 修复：防御性编程，防止获取空对象导致 AttributeError
-            if not response or not getattr(response, 'result_chain', None):
+            if getattr(response, 'result_chain', None) is None:
                 raise ValueError("VLM Provider 发生故障，返回了无效或为空的响应对象。")
                 
             result_text = response.result_chain.get_plain_text().strip()
@@ -75,12 +75,14 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                     raise ValueError(f"无法从大模型回复中提取任何合法序号。原始内容: {result_text}")
                     
         except asyncio.CancelledError:
-            # 修复：确保任务取消信号不被掩盖
             raise
         except Exception as e:
             logger.warning(f"VLM 选择过程发生异常 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                await asyncio.sleep(2)
+                # 修复：引入带 Jitter 的指数退避，应对 API 限流 (Rate Limit) 拥堵
+                base_sleep = 2 ** attempt
+                jitter = random.uniform(0, 1)
+                await asyncio.sleep(base_sleep + jitter)
                 
     logger.error("VLM 重试均失败，降级返回第一张图。")
     return 0
