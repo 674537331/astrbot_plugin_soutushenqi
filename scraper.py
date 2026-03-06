@@ -32,7 +32,7 @@ async def get_browser() -> Browser:
     global _playwright_mgr, _browser
     lock = await _get_browser_lock()
     async with lock:
-        # 🚀 增强健康度检查：若进程意外死亡则重建 🚀
+        # 🚀 进程状态健康度检查，防死锁核心 🚀
         if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
@@ -101,7 +101,6 @@ def is_valid_image_url(u: str) -> bool:
     return True
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
-    """独立在线程池中执行正则匹配，防阻塞"""
     raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
     valid_urls = []
     for u in raw_urls:
@@ -159,6 +158,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     valid_urls = []
     error_msg = ""
     context = None
+    page = None
     
     try:
         browser = await get_browser()
@@ -181,7 +181,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     pass
                 
                 html_content = await page.content()
-                # 🚀 避免在主线程中执行可能回溯爆炸的长文本正则搜索 🚀
                 loop = asyncio.get_running_loop()
                 valid_urls = await loop.run_in_executor(None, _extract_urls_from_html_sync, html_content, target_count)
                 if len(valid_urls) >= target_count:
@@ -200,11 +199,16 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     except Exception as e:
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
+        # 🚀 严谨地独立清理 Page 和 Context，杜绝内存泄漏 🚀
+        if page:
+            try:
+                await page.close()
+            except Exception as e:
+                logger.error(f"清理页面句柄异常: {e}")
         if context:
-            # 🚀 独立包裹，防二次崩溃 🚀
             try:
                 await context.close()
             except Exception as e:
-                logger.error(f"清理浏览器上下文时发生异常: {e}")
+                logger.error(f"清理浏览器上下文异常: {e}")
             
     return valid_urls[:target_count], error_msg
