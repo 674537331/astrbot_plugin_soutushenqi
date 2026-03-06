@@ -19,54 +19,59 @@ class SouTuShenQiPlugin(Star):
         核心逻辑：使用 Playwright 后台打开网页，搜索并抓取第一张高清图链接
         """
         async with async_playwright() as p:
-            # 启动无头浏览器 (不显示界面)
+            # 启动无头浏览器
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
             try:
-                # 访问搜索结果页
                 search_url = f"https://www.soutushenqi.com/image/search?searchWord={keyword}"
-                
-                # 【重要修复】将 wait_until 从 "networkidle" 改为 "domcontentloaded" 避免死等超时
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
                 
-                # 【新代码：智能等待真实搜索结果图片渲染】
-                # 循环检查页面，直到出现至少一张 src 不是官方自身域名的“外链图片”
-                await page.wait_for_function(
-                    '''() => {
-                        const imgs = Array.from(document.querySelectorAll("img"));
-                        return imgs.some(img => img.src && img.src.startsWith("http") && !img.src.includes("soutushenqi.com"));
-                    }''',
-                    timeout=15000
-                )
+                # 【策略升级1：强制等待 + 模拟真实用户滚动】
+                # 等待3秒，确保前端的 Ajax 请求已发送并返回
+                await page.wait_for_timeout(3000)
+                # 模拟鼠标向下滚动 1000 像素，强行触发网页的懒加载机制
+                await page.evaluate("window.scrollBy(0, 1000)")
+                # 给图片一点渲染时间
+                await page.wait_for_timeout(1500)
                 
-                # 执行 JS 获取所有图片的 src
-                img_srcs = await page.eval_on_selector_all(
-                    'img', 
-                    'imgs => imgs.map(img => img.src).filter(src => src.startsWith("http"))'
-                )
+                # 【策略升级2：全面提取 src 和 data-src】
+                img_srcs = await page.evaluate('''() => {
+                    const imgs = Array.from(document.querySelectorAll("img"));
+                    return imgs.map(img => {
+                        // 很多网站真实图片藏在 data-src 等自定义属性里
+                        return img.getAttribute("data-src") || img.getAttribute("data-original") || img.src;
+                    }).filter(src => src && src.startsWith("http"));
+                }''')
                 
-                # 过滤掉头像、logo、占位图等无用小图，提取真正的壁纸图
+                # 过滤掉不需要的 UI 元素小图
                 valid_urls = [
                     src for src in img_srcs 
-                    if 'soutushenqi.com' not in src 
-                    and 'avatar' not in src 
+                    if 'avatar' not in src 
                     and 'logo' not in src.lower()
+                    and 'qrcode' not in src.lower()
+                    and 'icon' not in src.lower()
                 ]
                 
-                if not valid_urls:
-                    logger.warning(f"页面加载成功，但未提取到有效的图片URL。获取到的全部 img src: {img_srcs[:5]}")
+                # 优先寻找外链图片（即真正的第三方壁纸图）
+                third_party_urls = [src for src in valid_urls if 'soutushenqi.com' not in src]
+                
+                # 如果有第三方外链图，优先用；实在没有，再用站内的
+                final_urls = third_party_urls if third_party_urls else valid_urls
+                
+                if not final_urls:
+                    logger.warning(f"最终未能提取到壁纸 URL。抓取到的原始链接有: {img_srcs[:5]}")
                     return ""
                     
                 # 拿到第一张有效图，并去除缩略图后缀 (例如 @1192w.webp) 还原高清大图
-                raw_url = valid_urls[0]
+                raw_url = final_urls[0]
                 hd_url = raw_url.split('@')[0]
                 
                 logger.info(f"成功获取高清原图链接: {hd_url}")
                 return hd_url
                 
             except Exception as e:
-                logger.error(f"Playwright 抓取失败: {e}")
+                logger.error(f"Playwright 抓取异常: {e}")
                 return ""
             finally:
                 await browser.close()
