@@ -2,7 +2,7 @@
 """
 图像处理与下载模块
 重构版：解耦了下载与拼贴逻辑，提供并发批量下载。
-提取了魔法常量 TILE_SIZE。
+提取了魔法常量 TILE_SIZE。合规化了框架日志导入。
 """
 import io
 import math
@@ -10,9 +10,7 @@ import asyncio
 import aiohttp
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-import logging
-
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger  # 修复：使用 AstrBot 官方接管的 logger
 
 # 将魔法数字提取为常量，未来如果改 16 宫格或大图版，只需改这里
 TILE_SIZE = 300
@@ -42,7 +40,9 @@ async def download_image(url: str) -> Optional[bytes]:
                         return None
                     return await resp.read()
                 return None
-    except Exception:
+    except Exception as e:
+        # 记录底层异常，防止彻底静默
+        logger.debug(f"单图下载失败 ({url}): {e}")
         return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
