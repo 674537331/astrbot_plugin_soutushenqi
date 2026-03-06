@@ -12,7 +12,7 @@ logger = logging.getLogger("astrbot")
 
 async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], str]:
     """
-    抓取指定数量的图片URL。
+    抓取指定数量的图片URL，构建候选池。
     
     Args:
         keyword (str): 搜索关键词
@@ -44,7 +44,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             search_url = f"https://www.soutushenqi.com/image/search?searchWord={urllib.parse.quote(keyword)}"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
             
-            # 执行滚动操作以触发懒加载
             for _ in range(4):
                 await page.wait_for_timeout(1500)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -65,7 +64,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     if not any(ext in low_u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
                         continue
                         
-                    # 去除第三方图床可能带有的压缩参数
                     clean_url = u.split('@')[0]
                     if clean_url not in valid_urls:
                         valid_urls.append(clean_url)
@@ -77,7 +75,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     break
 
             if not valid_urls:
-                error_msg = "正则扫描未能匹配到符合白名单规则的第三方图片URL。"
+                error_msg = "未能匹配到符合白名单规则的第三方图片URL。"
                 
         except Exception as e:
             error_msg = f"Playwright 抓取异常: {str(e)}"
