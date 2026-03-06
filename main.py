@@ -8,7 +8,7 @@ from .scraper import fetch_image_urls, fetch_bing_image_urls
 from .composer import download_image_batch, create_collage_from_items
 from .vlm import select_best_image_index
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件", "v2.1.4")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件", "v2.1.5")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,56 +27,64 @@ class SouTuShenQiPlugin(Star):
         batch_size = self.config.get("batch_size", 9)
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}")
         
-        # 1. 尝试主源
+        # 1. 尝试主源抓取
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
-        
+        logger.info(f"主来源下载完成，实际存活 {len(items)}/{batch_size} 张。")
+
         # 2. 强力补满 9 张（改为向 Bing 请求大量候选以抵消坏链）
         if len(items) < batch_size:
-            logger.warning(f"存活不足({len(items)}), 启动 Bing 强力补全...")
+            logger.warning(f"图片数量不足，还差 {batch_size - len(items)} 张，启动 Bing 强力填补...")
             bing_urls = await fetch_bing_image_urls(keyword, 30)
-            seen = {u for u, _ in items}
-            bing_items = await download_image_batch([u for u in bing_urls if u not in seen])
+            seen_urls = {u for u, _ in items}
+            # 并发下载 Bing 的图
+            bing_items = await download_image_batch([u for u in bing_urls if u not in seen_urls])
             for u, b in bing_items:
                 items.append((u, b))
                 if len(items) >= batch_size: break
-        
-        if not items: return None, "两路搜索均未找到可下载图片。"
+            logger.info(f"混合填补完毕，最终参与比对的总图数: {len(items)}")
 
-        # 3. VLM 比对逻辑
+        if not items: return None, "所有的图片渠道均失效或被拦截，无一可用。"
+
+        # 3. 模式 A: 启用 VLM 淘汰比对
         if use_vlm_selection and len(items) > 1:
             collage_bytes, valid_items = await create_collage_from_items(items)
             vlm_provider = await self._get_vlm_provider(event)
             if vlm_provider and collage_bytes:
+                logger.info(f"开始大模型淘汰比对 ({len(valid_items)} 选 1)...")
                 best_idx = await select_best_image_index(vlm_provider, collage_bytes, keyword, len(valid_items))
-                if best_idx == -1: return None, "搜出的图均不相关。"
+                if best_idx == -1:
+                    return None, "检索到的图片均与关键词无关，已自动拦截。"
                 return valid_items[best_idx][1], ""
             return items[0][1], ""
-        return items[0][1], ""
+        else:
+            return items[0][1], ""
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
         yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
         img, err = await self._process_image_search(event, keyword, True)
         if img: yield event.chain_result([Comp.Image.fromBytes(img)])
-        else: yield event.plain_result(f"失败: {err}")
+        else: yield event.plain_result(f"搜图失败: {err}")
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str, is_explanation: bool = False) -> str:
-        '''用于搜索网络图片并发送给用户。
+        '''用于搜索网络上的高清图片、壁纸、照片并发送给用户。
         Args:
-            keyword(string): 必须是具体的搜索词，如"拉克丝"。
-            is_explanation(boolean): 疑问句科普时传 true。
+            keyword(string): 具体的搜索关键词，必须简练精准。
+            is_explanation(boolean): 若用户要求科普或询问"什么是XX"时，才将其设为 true。
         '''
         img, err = await self._process_image_search(event, keyword, True)
         if img:
             result_msg = event.make_result()
             result_msg.chain = [Comp.Image.fromBytes(img)]
             await event.send(result_msg)
-            return f"图片已发送！关键词是{keyword}。请回复告知用户或继续解释。"
-        return f"搜图失败: {err}。请仅文字回复。"
+            return f"图片已成功发送给用户！关键词是{keyword}。你可以简单回复一句搜图完成的话语。"
+        return f"系统工具搜图失败: {err}。请向用户致歉并仅提供文字回复。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.config.get("enable_explanation_image", True):
-            req.system_prompt += "\n优先调用 search_image_tool 提供配图。"
+            instruction = "\n【核心工具调用规范】若用户询问具体实体（如XX是什么），请调用 search_image_tool 提供配图。"
+            if instruction not in req.system_prompt:
+                req.system_prompt += instruction
