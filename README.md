@@ -98,7 +98,7 @@ astrbot_plugin_soutushenqi/
 
 ---
 
-## 🤝 致谢与贡献
+### 🤝 致谢与贡献
 
 ```text
 如果您在使用中遇到了变态级的图床防盗链，欢迎提交 Issue 补充规则，或提交 Pull Request。
