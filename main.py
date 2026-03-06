@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
-@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器插件：正则降维打击版", "v1.0.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器插件：正则降维打击 + 防盗链校验版", "v1.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -21,7 +21,6 @@ class SouTuShenQiPlugin(Star):
         核心逻辑：使用正则暴力匹配网页源码中的所有外链图片
         """
         async with async_playwright() as p:
-            # 启动无头浏览器，伪装特征
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -31,7 +30,6 @@ class SouTuShenQiPlugin(Star):
                 ]
             )
             
-            # 换回电脑端 UA，电脑端返回的高清数据更完整
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={'width': 1920, 'height': 1080}
@@ -55,42 +53,34 @@ class SouTuShenQiPlugin(Star):
                     await page.wait_for_timeout(2000)
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     
-                    # 获取网页当前的全部源码（包括所有动态生成的 JS 变量和 DOM）
                     html_content = await page.content()
                     
-                    # 【核武器：正则表达式】
-                    # 匹配所有常规 HTTP 链接，以及被 URL 编码的链接 (https%3A%2F%2F...)
                     raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
                     
                     for u in raw_urls:
-                        # 如果是被编码的链接 (如 largeUrl=...)，将其解码还原
                         if '%3A%2F%2F' in u:
                             u = urllib.parse.unquote(u)
                             
                         if not u.startswith("http"): continue
-                        if 'soutushenqi.com' in u: continue # 排除官方域名
+                        if 'soutushenqi.com' in u: continue
                         
                         low_u = u.lower()
-                        # 排除没用的图标
                         if 'avatar' in low_u or 'logo' in low_u or 'icon' in low_u or 'qrcode' in low_u: 
                             continue
                             
-                        # 最严格的白名单：必须带有主流图片格式的后缀
                         if not any(ext in low_u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
                             continue
                             
                         valid_urls.append(u)
                         
-                    # 只要抓到了有效的第三方壁纸，立刻跳出循环，不再死等！
                     if valid_urls:
                         break
 
                 if not valid_urls:
-                    error_msg = f"未找到壁纸。\n[尝试次数]: {attempt+1}\n[源码长度]: {len(html_content)}\n[提取到的正则链接(前5个)]: {raw_urls[:5] if 'raw_urls' in locals() else '无'}"
+                    error_msg = f"未找到壁纸。\n[提取到的正则链接(前5个)]: {raw_urls[:5] if 'raw_urls' in locals() else '无'}"
                     logger.warning(f"搜图页面异常: {error_msg}")
                     return "", error_msg
 
-                # 拿到第一张图，并切掉 B站等图床可能带有的缩略图参数（@1192w.webp）
                 raw_url = valid_urls[0]
                 hd_url = raw_url.split('@')[0]
                 logger.info(f"【降维打击成功！】高清原图链接: {hd_url}")
@@ -104,14 +94,19 @@ class SouTuShenQiPlugin(Star):
             return hd_url, error_msg
 
     async def _download_to_memory(self, url: str) -> bytes:
+        # 【极其关键】删除了 Referer，直接以浏览器身份裸请求，防止触发源站防盗链
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.soutushenqi.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         try:
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(url, timeout=20) as resp:
                     if resp.status == 200:
+                        # 【安全校验】检查返回的内容到底是不是图片！如果是网页HTML，直接拒绝！
+                        content_type = resp.headers.get('Content-Type', '').lower()
+                        if 'text/html' in content_type:
+                            logger.error(f"图片下载失败：源站启动了防盗链，返回了HTML网页！")
+                            return None
                         return await resp.read()
                     else:
                         logger.error(f"图片下载失败，HTTP 状态码: {resp.status}")
@@ -134,7 +129,8 @@ class SouTuShenQiPlugin(Star):
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"图片提取成功，但下载超时或被拦截：\n{hd_url}")
+            # 如果触发了极少数无法破解的防盗链，至少把链接发出来供用户点击
+            yield event.plain_result(f"图片提取成功，但触发了源站防盗链无法直接发送。\n请直接点击链接查看原图：\n{hd_url}")
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str):
@@ -155,4 +151,4 @@ class SouTuShenQiPlugin(Star):
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"获取到了图片链接，但下载失败: {hd_url}")
+            yield event.plain_result(f"获取到了图片链接，但触发了防盗链无法下载: {hd_url}")
