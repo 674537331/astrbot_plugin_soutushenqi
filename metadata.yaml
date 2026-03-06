@@ -1,5 +1,9 @@
 name: astrbot_plugin_soutushenqi
-desc: 基于无头浏览器和搜图神器的聚合搜图插件，支持大模型自然语言调用。
-version: v1.0.0
-author: YourName
-astrbot_version: ">=4.0.0"
+desc: 基于搜图神器的文字搜图插件。支持多图淘汰比对、Bing兜底、自然语言调用，对话自动配图。
+display_name: 搜图神器
+version: v2.0.0
+author: RyanVaderAN
+repo: https://github.com/674537331/astrbot_plugin_soutushenqi
+astrbot_version: ">=4.10.0"
+support_platforms:
+  - aiocqhttp
