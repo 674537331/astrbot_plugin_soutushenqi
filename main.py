@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
+import io
+from PIL import Image
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
-import io
-from PIL import Image
 
 from .scraper import fetch_image_urls, fetch_bing_image_urls
 from .composer import download_image_batch, create_collage_from_items
 from .vlm import select_best_image_index
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.1.0")
+# --- 常量定义区 ---
+SUPPLEMENT_THRESHOLD_RATIO = 0.3
+JPEG_QUALITY = 95
+
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.2.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,12 +31,9 @@ class SouTuShenQiPlugin(Star):
         curr_id = await self.context.get_current_chat_provider_id(umo)
         return self.context.get_provider_by_id(curr_id)
 
-    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
-        batch_size = self.config.get("batch_size", 16)
-        threshold = batch_size * 0.3  
-        eval_desc = description if description else keyword
-        logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}")
-        
+    async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
+        """子模块：负责基础图像获取与防盗链兜底"""
+        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
         logger.info(f"主来源下载完成，实际存活 {len(items)} 张。")
@@ -50,47 +51,72 @@ class SouTuShenQiPlugin(Star):
             
             items = items[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对的总存活图片数: {len(items)}")
+            
+        return items
 
+    async def _vlm_selection(self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str) -> tuple[str, bytes, str]:
+        """子模块：负责构建拼图与大模型淘汰比对"""
+        collage_bytes, valid_items = await create_collage_from_items(items)
+        if not collage_bytes or not valid_items:
+            return "", b"", "图片拼合处理失败，可用图片的数据均已损坏。"
+            
+        vlm_provider = await self._get_vlm_provider(event)
+        if vlm_provider:
+            logger.info(f"开始大模型淘汰比对 ({len(valid_items)} 选 1)...")
+            best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
+            
+            if best_idx == -1:
+                logger.warning("VLM 判定所有候选图均不符合要求，已一票否决。")
+                return "", b"", "检索到的图片均与要求无关，为保证质量已自动拦截。"
+                
+            final_url, final_bytes = valid_items[best_idx]
+            logger.info(f"VLM优胜决定：{final_url}")
+            return final_url, final_bytes, ""
+        else:
+            return valid_items[0][0], valid_items[0][1], ""
+
+    def _format_image(self, img_bytes: bytes) -> bytes:
+        """子模块：负责图片格式校验与安全转码"""
+        try:
+            img = Image.open(io.BytesIO(img_bytes))
+            if img.format not in ['JPEG', 'PNG']:
+                img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+                final_bytes = buf.getvalue()
+                logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
+                return final_bytes
+            return img_bytes
+        except OSError as e:
+            logger.warning(f"图片转码检测时发生IO格式错误 (将尝试发送原始数据): {e}")
+            return img_bytes
+        except Exception as e:
+            logger.warning(f"图片转码检测时发生未知错误: {e}")
+            return img_bytes
+
+    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
+        """总调度管线"""
+        batch_size = self.config.get("batch_size", 16)
+        eval_desc = description if description else keyword
+        logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}")
+        
+        # 1. 保障获取候选图集
+        items = await self._ensure_minimum_images(keyword, batch_size)
         if not items:
             return None, "所有的图片渠道均触发强力防盗链或失效，无一可用。"
 
-        # 核心筛选逻辑
-        final_url, final_bytes = "", b""
+        # 2. 模型淘汰筛选
+        final_bytes = b""
         if use_vlm_selection and len(items) > 1:
-            collage_bytes, valid_items = await create_collage_from_items(items)
-            if not collage_bytes or not valid_items:
-                return None, "图片拼合处理失败，可用图片的数据均已损坏。"
-                
-            vlm_provider = await self._get_vlm_provider(event)
-            if vlm_provider:
-                logger.info(f"开始大模型淘汰比对 ({len(valid_items)} 选 1)...")
-                best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
-                
-                if best_idx == -1:
-                    logger.warning("VLM 判定所有候选图均不符合要求，已一票否决。")
-                    return None, "检索到的图片均与要求无关，为保证质量已自动拦截。"
-                    
-                final_url, final_bytes = valid_items[best_idx]
-                logger.info(f"VLM优胜决定：{final_url}")
-            else:
-                final_url, final_bytes = valid_items[0]
+            _, final_bytes, err_msg = await self._vlm_selection(event, items, eval_desc)
+            if not final_bytes:
+                return None, err_msg
         else:
             final_url, final_bytes = items[0]
             logger.info(f"跳过VLM，直接返回首张图：{final_url}")
 
-        # 🚀 绝杀黑洞：全局强制 JPEG 转码护航 🚀
-        try:
-            img = Image.open(io.BytesIO(final_bytes))
-            # 过滤掉容易被平台静默吞噬的格式 (WebP, AVIF, HEIC 等)
-            if img.format not in ['JPEG', 'PNG']:
-                img = img.convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=95)
-                final_bytes = buf.getvalue()
-                logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
-        except Exception as e:
-            logger.warning(f"图片转码检测时发生异常 (将尝试发送原始数据): {e}")
-
+        # 3. 输出格式化
+        final_bytes = self._format_image(final_bytes)
         return final_bytes, ""
 
     @filter.command("搜图")
@@ -122,7 +148,6 @@ class SouTuShenQiPlugin(Star):
         img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
         
         if img_bytes:
-            # 🚀 规范化主动发送：严格遵循框架生命周期要求 🚀
             message_result = event.make_result()
             message_result.chain = [Comp.Image.fromBytes(img_bytes)]
             await event.send(message_result) 
