@@ -10,21 +10,29 @@ from astrbot.api import logger
 TILE_SIZE = 300
 MAX_IMAGE_SIZE = 20 * 1024 * 1024  
 
-# --- 全局 Session 管理器 ---
+# --- 全局 Session 懒加载管理 ---
 _composer_session = None
-_composer_session_lock = asyncio.Lock()
+_composer_session_lock = None
+
+async def _get_composer_lock():
+    """安全懒加载 asyncio 对象，防止跨循环错误"""
+    global _composer_session_lock
+    if _composer_session_lock is None:
+        _composer_session_lock = asyncio.Lock()
+    return _composer_session_lock
 
 async def get_composer_session() -> aiohttp.ClientSession:
     global _composer_session
-    async with _composer_session_lock:
+    lock = await _get_composer_lock()
+    async with lock:
         if _composer_session is None or _composer_session.closed:
-            # 移除全局总超时，依赖单次请求的 timeout
             _composer_session = aiohttp.ClientSession()
     return _composer_session
 
 async def close_composer_session():
     global _composer_session
-    async with _composer_session_lock:
+    lock = await _get_composer_lock()
+    async with lock:
         if _composer_session and not _composer_session.closed:
             await _composer_session.close()
             _composer_session = None
@@ -54,7 +62,13 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     if 'text/html' in content_type:
                         return None
                     
-                    content_length = int(resp.headers.get('Content-Length', 0))
+                    # 修复：更容错的请求头解析
+                    content_length_str = resp.headers.get('Content-Length', '0')
+                    try:
+                        content_length = int(content_length_str)
+                    except ValueError:
+                        content_length = 0
+                        
                     if content_length > MAX_IMAGE_SIZE:
                         logger.warning(f"下载拒绝：目标文件超出安全大小: {url}")
                         return None
@@ -65,7 +79,6 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             logger.debug(f"并发下载时网络连接或超时失败 ({url}): {e}")
             return None
         except asyncio.CancelledError:
-            # 修复：防掩盖异步取消信号
             raise
         except Exception as e:
             logger.debug(f"并发下载时发生未知异常 ({url}): {e}")
