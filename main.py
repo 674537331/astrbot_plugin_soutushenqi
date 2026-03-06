@@ -9,36 +9,65 @@ from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
-@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器无头浏览器插件，支持自然语言调用", "v1.0.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器插件：支持详细报错输出", "v1.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-    async def _get_image_url_from_web(self, keyword: str) -> str:
+    async def _get_image_url_from_web(self, keyword: str) -> tuple[str, str]:
         """
-        核心逻辑：使用 Playwright 访问搜索结果，并直接从超链接参数中截获高清原图直链
+        核心逻辑：使用带伪装的 Playwright 抓取。
+        返回 tuple: (高清图URL, 错误信息详情)
         """
         async with async_playwright() as p:
-            # 启动无头浏览器 (headless=True 确保在后台静默运行)
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            # 【反反爬升级】启动无头浏览器，但伪装得像个真人
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled', # 隐藏 webdriver 标记
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
+            )
+            
+            # 使用手机设备的 User-Agent 往往能绕过很多风控，且页面更简单
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                viewport={'width': 390, 'height': 844}
+            )
+            
+            page = await context.new_page()
+            
+            # 注入脚本，进一步隐藏自动控制特征
+            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            error_msg = ""
+            hd_url = ""
             
             try:
-                # 访问搜索结果页
                 search_url = f"https://www.soutushenqi.com/image/search?searchWord={keyword}"
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
                 
-                # 【绝杀策略】
-                # 我们不再傻等 <img> 标签加载完毕，而是直接寻找带有 'largeUrl' 参数的超链接 <a>
-                # 这 100% 是真实的搜索结果，且速度极快
-                await page.wait_for_selector('a[href*="largeUrl="]', timeout=15000)
+                # 强制等 3 秒让数据加载
+                await page.wait_for_timeout(3000)
                 
-                # 利用 JS 直接从 a 标签的 href 中解析出 largeUrl 的值（也就是高清原图直链）
+                # 【诊断级排错】如果找不到 a 标签，我们把页面的真实 HTML 结构抓出来看看
+                try:
+                    await page.wait_for_selector('a[href*="largeUrl="]', timeout=8000)
+                except Exception:
+                    # 获取当前页面的纯文本和 <a> 标签的情况，用于 QQ 输出
+                    page_text = await page.evaluate("document.body.innerText")
+                    a_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href).slice(0, 5)")
+                    
+                    error_msg = f"找不到 largeUrl 参数。\n[页面前100个字符]: {page_text[:100]}\n[抓到的前5个链接]: {a_links}"
+                    logger.warning(f"搜图页面异常: {error_msg}")
+                    return "", error_msg
+
+                # 解析 URL
                 hd_urls = await page.evaluate('''() => {
                     const links = Array.from(document.querySelectorAll('a[href*="largeUrl="]'));
                     return links.map(a => {
                         try {
-                            // 使用 URL 对象自动解析并解码 URL 参数 (例如将 %3A%2F%2F 还原为 ://)
                             const urlObj = new URL(a.href, window.location.origin);
                             return urlObj.searchParams.get("largeUrl");
                         } catch (e) {
@@ -47,61 +76,49 @@ class SouTuShenQiPlugin(Star):
                     }).filter(url => url && url.startsWith("http"));
                 }''')
                 
-                if not hd_urls:
-                    logger.warning("页面加载成功，但未能从超链接中提取到 largeUrl 参数。")
-                    return ""
+                if hd_urls:
+                    hd_url = hd_urls[0]
                     
-                # 拿到第一张原图
-                hd_url = hd_urls[0]
-                
-                logger.info(f"【完美破局】直接从链接参数中截获高清原图: {hd_url}")
-                return hd_url
-                
             except Exception as e:
-                logger.error(f"Playwright 抓取异常: {e}")
-                return ""
+                error_msg = f"Playwright 发生严重异常: {str(e)}"
+                logger.error(error_msg)
             finally:
                 await browser.close()
+                
+            return hd_url, error_msg
 
     async def _download_to_memory(self, url: str) -> bytes:
-        """
-        将图片下载到内存中，不占用服务器硬盘空间
-        """
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.soutushenqi.com/"
         }
         try:
-            # 增加超时时间以应对超大高清图的下载
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(url, timeout=20) as resp:
                     if resp.status == 200:
                         return await resp.read()
-                    else:
-                        logger.error(f"图片下载失败，HTTP 状态码: {resp.status}")
         except Exception as e:
             logger.error(f"图片内存下载异常: {e}")
         return None
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
-        """
-        用户手动调用的指令：/搜图 [关键词]
-        """
         yield event.plain_result(f"🔍 正在前往搜图神器寻找【{keyword}】的高清图片，请稍等片刻...")
         
-        # 1. 极速获取图片 URL
-        hd_url = await self._get_image_url_from_web(keyword)
+        # 获取图片 URL 和详细报错
+        hd_url, err_msg = await self._get_image_url_from_web(keyword)
+        
         if not hd_url:
-            yield event.plain_result("😭 抱歉，没有找到相关图片或请求超时。")
+            # 直接在 QQ 输出诊断信息
+            reply = f"😭 抱歉，抓取失败了！\n\n【诊断日志】\n{err_msg}"
+            yield event.plain_result(reply)
             return
             
-        # 2. 内存下载并发送
         img_bytes = await self._download_to_memory(hd_url)
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"图片下载失败，可能因原图体积过大或源站防盗链拦截。你可以直接点击链接查看原图：\n{hd_url}")
+            yield event.plain_result(f"图片提取成功，但下载超时或被拦截：\n{hd_url}")
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str):
@@ -109,17 +126,15 @@ class SouTuShenQiPlugin(Star):
         根据用户的视觉需求，在网络上搜索一张最匹配的高清图片并发送。
 
         Args:
-            keyword(string): 必需参数。搜索关键词，例如“赛博朋克 城市”、“可爱 猫咪”、“BMPT坦克”等。
+            keyword(string): 必需参数。搜索关键词，例如“赛博朋克 城市”、“可爱 猫咪”等。
         """
-        logger.info(f"大模型触发搜图工具，关键词: {keyword}")
-        
-        hd_url = await self._get_image_url_from_web(keyword)
+        hd_url, err_msg = await self._get_image_url_from_web(keyword)
         if not hd_url:
-            yield event.plain_result(f"搜索图片失败，请告知用户没有找到关于“{keyword}”的图片。")
+            yield event.plain_result(f"搜索失败，错误信息: {err_msg}")
             return
             
         img_bytes = await self._download_to_memory(hd_url)
         if img_bytes:
             yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
         else:
-            yield event.plain_result(f"已获取到图片链接，但下载失败: {hd_url}")
+            yield event.plain_result(f"获取到了图片链接: {hd_url}")
