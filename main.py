@@ -97,7 +97,6 @@ class SouTuShenQiPlugin(Star):
             keyword(string): 需搜索的实体关键词。
             is_explanation(boolean): 若用户明确指令你“搜一张图”，填 False；若用户是在询问“什么是XX”，你需要为其配图解释，则必须填 True。
         """
-        # 核心解耦逻辑：根据大模型识别的意图，走不同的配置开关
         if is_explanation:
             use_vlm = self.config.get("enable_explanation_vlm_selection", False)
         else:
@@ -106,10 +105,17 @@ class SouTuShenQiPlugin(Star):
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
         
         if img_bytes:
-            yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
-            yield event.plain_result("图片提取成功，已发送给用户。")
+            # 核心修复：使用 MessageChain 和 await event.send 发送图片，保持函数的 return 能力
+            chain = Comp.MessageChain([Comp.Image.fromBytes(img_bytes)])
+            await event.send(chain)
+            
+            # 使用 return 将状态喂给大模型，引导大模型继续输出文字
+            if is_explanation:
+                return f"图片已成功提取并直接发送给用户了！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
+            else:
+                return "图片已成功提取并直接发送给用户了！你可以简单回复一句搜图完成的话语。"
         else:
-            yield event.plain_result(f"系统工具搜图失败: {err_msg}")
+            return f"系统工具搜图失败: {err_msg}。请向用户致歉并仅提供文字回复。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
