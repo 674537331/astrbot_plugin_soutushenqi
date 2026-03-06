@@ -7,15 +7,11 @@ from astrbot.api.provider import ProviderRequest
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
-from .scraper import fetch_image_urls, fetch_bing_image_urls
-from .composer import download_image_batch, create_collage_from_items
-from .vlm import select_best_image_index
-
 # --- 常量定义区 ---
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.4.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.5.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -33,9 +29,16 @@ class SouTuShenQiPlugin(Star):
             provider = self.context.get_provider_by_id(provider_id)
             if provider: return provider
         
-        umo = event.unified_msg_origin
-        curr_id = await self.context.get_current_chat_provider_id(umo)
-        return self.context.get_provider_by_id(curr_id)
+        # 修复：空指针防御与兜底
+        umo = getattr(event, "unified_msg_origin", None)
+        if umo:
+            curr_id = await self.context.get_current_chat_provider_id(umo)
+            if curr_id:
+                provider = self.context.get_provider_by_id(curr_id)
+                if provider: return provider
+                
+        # 终极兜底：如果没有获取到特定会话的提供商，回退到全局 llm
+        return getattr(self.context, 'llm', None)
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
         """子模块：负责基础图像获取与防盗链兜底"""
@@ -49,7 +52,6 @@ class SouTuShenQiPlugin(Star):
             bing_urls = await fetch_bing_image_urls(keyword, batch_size)
             bing_items = await download_image_batch(bing_urls)
             
-            # 修复：避免修改原始列表引用，使用列表推导式创建新列表合并
             seen_urls = {u for u, _ in items}
             new_bing_items = [(u, b) for u, b in bing_items if u not in seen_urls]
             
@@ -82,15 +84,17 @@ class SouTuShenQiPlugin(Star):
     def _format_image(self, img_bytes: bytes) -> bytes:
         """子模块：负责图片格式校验与安全转码"""
         try:
-            img = Image.open(io.BytesIO(img_bytes))
-            if img.format not in ['JPEG', 'PNG']:
-                img = img.convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-                final_bytes = buf.getvalue()
-                logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
-                return final_bytes
-            return img_bytes
+            # 修复：使用 with 上下文管理器确保内存被主动释放
+            with io.BytesIO(img_bytes) as img_io:
+                img = Image.open(img_io)
+                if img.format not in ['JPEG', 'PNG']:
+                    img = img.convert("RGB")
+                    with io.BytesIO() as buf:
+                        img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+                        final_bytes = buf.getvalue()
+                    logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
+                    return final_bytes
+                return img_bytes
         except UnidentifiedImageError:
             logger.warning("捕获到 UnidentifiedImageError，图片文件可能已损坏或非合法图像格式。")
             return img_bytes
@@ -107,12 +111,10 @@ class SouTuShenQiPlugin(Star):
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}")
         
-        # 1. 保障获取候选图集
         items = await self._ensure_minimum_images(keyword, batch_size)
         if not items:
             return None, "所有的图片渠道均触发强力防盗链或失效，无一可用。"
 
-        # 2. 模型淘汰筛选
         final_bytes = b""
         if use_vlm_selection and len(items) > 1:
             _, final_bytes, err_msg = await self._vlm_selection(event, items, eval_desc)
@@ -122,7 +124,6 @@ class SouTuShenQiPlugin(Star):
             final_url, final_bytes = items[0]
             logger.info(f"跳过VLM，直接返回首张图：{final_url}")
 
-        # 3. 输出格式化
         final_bytes = self._format_image(final_bytes)
         return final_bytes, ""
 
