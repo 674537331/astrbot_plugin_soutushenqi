@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import io
 import asyncio
+import hashlib
 from PIL import Image, UnidentifiedImageError
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -14,8 +15,9 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
+MAX_BATCH_SIZE = 36  # 防御性安全上限，防止恶意配置引发 OOM
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.8.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -45,7 +47,10 @@ class SouTuShenQiPlugin(Star):
         return getattr(self.context, 'llm', None)
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
+        # 安全断言：限制单次最大处理数量
+        batch_size = min(batch_size, MAX_BATCH_SIZE)
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
+        
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
         logger.info(f"主来源下载完成，存活 {len(items)} 张。")
@@ -55,8 +60,17 @@ class SouTuShenQiPlugin(Star):
             bing_urls = await fetch_bing_image_urls(keyword, batch_size)
             bing_items = await download_image_batch(bing_urls)
             
+            # 🚀 物理级去重：URL 去重 + 字节级 MD5 去重，杜绝相同图片的烂数据 🚀
             seen_urls = {u for u, _ in items}
-            new_bing_items = [(u, b) for u, b in bing_items if u not in seen_urls]
+            seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
+            
+            new_bing_items = []
+            for u, b in bing_items:
+                if u not in seen_urls:
+                    b_hash = hashlib.md5(b).hexdigest()
+                    if b_hash not in seen_hashes:
+                        new_bing_items.append((u, b))
+                        seen_hashes.add(b_hash)
             
             items = (items + new_bing_items)[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对数: {len(items)}")
@@ -87,12 +101,16 @@ class SouTuShenQiPlugin(Star):
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
                 if img.format not in ['JPEG', 'PNG']:
-                    # 🚀 完美修复透明通道变黑问题 🚀
+                    # 🚀 完美的透明图层复合逻辑 🚀
                     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                        alpha = img.convert('RGBA').split()[-1]
-                        bg = Image.new("RGB", img.size, (255, 255, 255)) # 用纯白垫底
-                        bg.paste(img, mask=alpha)
-                        img = bg
+                        try:
+                            img = img.convert('RGBA')
+                            bg = Image.new("RGB", img.size, (255, 255, 255))
+                            bg.paste(img, mask=img.split()[3])
+                            img = bg
+                        except Exception as alpha_e:
+                            logger.debug(f"Alpha 通道复合失败，降级转换: {alpha_e}")
+                            img = img.convert("RGB")
                     else:
                         img = img.convert("RGB")
                         
@@ -120,7 +138,7 @@ class SouTuShenQiPlugin(Star):
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
         
-        items = await self._ensure_minimum_images(keyword, batch_size)
+        items = await self._ensure_minimum_images(keyword, min(batch_size, MAX_BATCH_SIZE))
         if not items:
             return None, "所有的图片渠道均触发强力防盗链或失效，无一可用。"
 
@@ -138,7 +156,6 @@ class SouTuShenQiPlugin(Star):
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str, description: str = ""):
-        # 🚀 增加外层异常兜底 🚀
         try:
             use_vlm = self.config.get("enable_cmd_vlm_selection", True)
             yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
