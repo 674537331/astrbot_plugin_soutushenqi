@@ -9,38 +9,43 @@ from astrbot.api import logger
 
 TILE_SIZE = 300
 
-async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[bytes]:
-    referer = "https://www.google.com/"
-    if 'baidu.com' in url or 'bdimg.com' in url:
-        referer = "https://image.baidu.com/"
-    elif 'duitang.com' in url:
-        referer = "https://www.duitang.com/"
-    elif 'bilibili.com' in url or 'hdslb.com' in url:
-        referer = "https://www.bilibili.com/"
+# 增加信号量参数
+async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
+    # 🚀 获取信号量锁，限制并发请求数 🚀
+    async with semaphore:
+        referer = "https://www.google.com/"
+        if 'baidu.com' in url or 'bdimg.com' in url:
+            referer = "https://image.baidu.com/"
+        elif 'duitang.com' in url:
+            referer = "https://www.duitang.com/"
+        elif 'bilibili.com' in url or 'hdslb.com' in url:
+            referer = "https://www.bilibili.com/"
+            
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": referer,
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
+        }
         
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": referer,
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-    }
-    
-    try:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                content_type = resp.headers.get('Content-Type', '').lower()
-                if 'text/html' in content_type:
-                    return None
-                return await resp.read()
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    content_type = resp.headers.get('Content-Type', '').lower()
+                    if 'text/html' in content_type:
+                        return None
+                    return await resp.read()
+                return None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug(f"并发下载时网络连接失败 ({url}): {e}")
             return None
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.debug(f"并发下载时网络连接失败 ({url}): {e}")
-        return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    # 统一复用 ClientSession 连接池，大幅降低并发开销
     timeout = aiohttp.ClientTimeout(total=15, connect=5)
+    # 🚀 设置并发安全阀：同时最多 10 个连接 🚀
+    semaphore = asyncio.Semaphore(10) 
+    
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        tasks = [download_image(session, url) for url in urls]
+        tasks = [download_image(session, semaphore, url) for url in urls]
         results = await asyncio.gather(*tasks)
     return [(u, r) for u, r in zip(urls, results) if r]
 
@@ -56,8 +61,7 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         except (IOError, UnidentifiedImageError):
             continue
 
-    if not successful_images:
-        return None, []
+    if not successful_images: return None, []
 
     columns = math.ceil(math.sqrt(len(successful_images)))
     rows = math.ceil(len(successful_images) / columns)
