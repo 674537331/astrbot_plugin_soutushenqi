@@ -26,8 +26,11 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
         }
         
+        # 修复：将超时限制设定在单次请求上，而非整个 Session
+        req_timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        
         try:
-            async with session.get(url, headers=headers) as resp:
+            async with session.get(url, headers=headers, timeout=req_timeout) as resp:
                 if resp.status == 200:
                     content_type = resp.headers.get('Content-Type', '').lower()
                     if 'text/html' in content_type:
@@ -35,17 +38,21 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     return await resp.read()
                 return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.debug(f"并发下载时网络连接失败 ({url}): {e}")
+            logger.debug(f"并发下载时网络连接或超时失败 ({url}): {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"并发下载时发生未知异常 ({url}): {e}")
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    timeout = aiohttp.ClientTimeout(total=15, connect=5)
     # 设置并发安全阀：同时最多 10 个连接
     semaphore = asyncio.Semaphore(10) 
     
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    # 修复：移除 Session 级别的绝对超时，防止排队任务被强制阻断
+    async with aiohttp.ClientSession() as session:
         tasks = [download_image(session, semaphore, url) for url in urls]
         results = await asyncio.gather(*tasks)
+        
     return [(u, r) for u, r in zip(urls, results) if r]
 
 def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
