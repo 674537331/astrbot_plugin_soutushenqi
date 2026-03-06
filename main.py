@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
@@ -15,11 +15,17 @@ from .vlm import select_best_image_index
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.2.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.3.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
+
+    async def terminate(self):
+        """当插件被禁用、更新或卸载时，自动清理常驻的无头浏览器资源"""
+        from .scraper import close_browser
+        await close_browser()
+        logger.info("SouTuShenQi 插件资源回收完毕，安全卸载。")
 
     async def _get_vlm_provider(self, event: AstrMessageEvent):
         provider_id = self.config.get("vlm_provider_id", "")
@@ -86,6 +92,9 @@ class SouTuShenQiPlugin(Star):
                 final_bytes = buf.getvalue()
                 logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
                 return final_bytes
+            return img_bytes
+        except UnidentifiedImageError:
+            logger.warning("捕获到 UnidentifiedImageError，图片文件可能已损坏或非合法图像格式。")
             return img_bytes
         except OSError as e:
             logger.warning(f"图片转码检测时发生IO格式错误 (将尝试发送原始数据): {e}")
