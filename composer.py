@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from astrbot.api import logger
 
 TILE_SIZE = 300
-MAX_IMAGE_SIZE = 20 * 1024 * 1024  
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 收紧防 OOM 阈值至 10MB
 
 _composer_session = None
 _composer_session_lock = None
@@ -52,14 +52,17 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                 if 'text/html' in content_type:
                     return None
                 
-                # 🚀 终极防 OOM 截断保护 🚀
-                # 读取 MAX+1 字节，如果超了立马丢弃，防范黑客伪造 Content-Length 或数据流攻击
-                data = await resp.content.read(MAX_IMAGE_SIZE + 1)
-                if len(data) > MAX_IMAGE_SIZE:
-                    logger.warning(f"下载中止：目标文件真实体积超过安全阈值 ({MAX_IMAGE_SIZE} bytes): {url}")
-                    return None
+                # 🚀 防 Tarpit 攻击：流式分块读取，超过物理容量直接强制掐断 🚀
+                chunks = []
+                downloaded_size = 0
+                async for chunk in resp.content.iter_chunked(1024 * 1024):  # 1MB 缓冲区块
+                    downloaded_size += len(chunk)
+                    if downloaded_size > MAX_IMAGE_SIZE:
+                        logger.warning(f"触发 OOM 防御：数据流超出 10MB 安全阈值，已强制阻断: {url}")
+                        return None
+                    chunks.append(chunk)
                     
-                return data
+                return b"".join(chunks)
                 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.debug(f"网络连接或超时 ({url}): {e}")
@@ -67,7 +70,6 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            # 🚀 提升异常暴露级别 🚀
             logger.warning(f"下载图片时发生未预料异常 ({url}): {e}")
             return None
 
