@@ -32,42 +32,51 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     for attempt in range(retries):
         try:
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
+            
+            # 修复：防御性编程，防止获取空对象导致 AttributeError
+            if not response or not getattr(response, 'result_chain', None):
+                raise ValueError("VLM Provider 发生故障，返回了无效或为空的响应对象。")
+                
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 1. 尝试直接加载纯净 JSON
             try:
                 clean_text = re.sub(r'^```json|```$', '', result_text, flags=re.MULTILINE).strip()
                 data = json.loads(clean_text)
                 index = int(data.get("best_index", 1))
                 
-                if index == 0: return -1 
-                if 1 <= index <= total_count: return index - 1
+                if index == 0:
+                    return -1 
+                if 1 <= index <= total_count:
+                    return index - 1
                 raise ValueError(f"JSON 提取的序号 {index} 超出有效范围 0-{total_count}")
                 
             except json.JSONDecodeError as e:
                 logger.debug(f"VLM JSON 解析失败: {e}, 原始内容片段: {result_text}")
                     
-            # 2. 防御性极强的降级正则策略
             fallback_match = re.search(r'(?:"best_index"\s*:\s*)(\d+)', result_text)
             if fallback_match:
                 index = int(fallback_match.group(1))
-                if index == 0: return -1
-                if 1 <= index <= total_count: return index - 1
+                if index == 0:
+                    return -1
+                if 1 <= index <= total_count:
+                    return index - 1
                 raise ValueError(f"降级提取的序号 {index} 超出有效范围 0-{total_count}")
             else:
-                # 修复：移除硬编码，动态判断提取范围
                 numbers = re.findall(r'(?<!\d)\d+(?!\d)', result_text)
                 if numbers:
-                    # 倒序遍历（如果模型话多，通常结论或编号放在最后面）
                     for n_str in reversed(numbers):
                         candidate = int(n_str)
                         if 0 <= candidate <= total_count:
-                            if candidate == 0: return -1
+                            if candidate == 0:
+                                return -1
                             return candidate - 1
                     raise ValueError(f"提取到的所有数字均不在有效范围 0-{total_count} 内")
                 else:
                     raise ValueError(f"无法从大模型回复中提取任何合法序号。原始内容: {result_text}")
                     
+        except asyncio.CancelledError:
+            # 修复：确保任务取消信号不被掩盖
+            raise
         except Exception as e:
             logger.warning(f"VLM 选择过程发生异常 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
