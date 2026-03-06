@@ -3,16 +3,42 @@ import re
 import urllib.parse
 import asyncio
 import aiohttp
-from playwright.async_api import async_playwright, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, Browser, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from astrbot.api import logger
 
 PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
-SCROLL_WAIT = 1500
+SCROLL_WAIT = 1000  # 缩短硬等待时间，交由 networkidle 动态等待
+
+# 🚀 全局浏览器单例管理 🚀
+_playwright_mgr = None
+_browser: Browser = None
+
+async def get_browser() -> Browser:
+    global _playwright_mgr, _browser
+    if _browser is None:
+        logger.info("初始化全局 Playwright 浏览器实例 (长生命周期)...")
+        _playwright_mgr = await async_playwright().start()
+        _browser = await _playwright_mgr.chromium.launch(
+            headless=True,
+            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+        )
+    return _browser
+
+async def close_browser():
+    """安全清理浏览器实例（由 main.py 卸载时调用）"""
+    global _playwright_mgr, _browser
+    if _browser:
+        await _browser.close()
+        _browser = None
+    if _playwright_mgr:
+        await _playwright_mgr.stop()
+        _playwright_mgr = None
+    logger.info("已彻底清理全局 Playwright 浏览器实例。")
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     valid_urls = []
     seen_urls = set()
@@ -23,9 +49,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
             while len(valid_urls) < target_count:
                 url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
                 async with session.get(url, timeout=15) as resp:
-                    if resp.status != 200:
-                        break
-                        
+                    if resp.status != 200: break
                     html = await resp.text()
                     matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://.*?)(?:"|&quot;)', html)
                     new_found = 0
@@ -33,87 +57,81 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     for img_url in matches:
                         if img_url and img_url.startswith("http"):
                             low_u = img_url.lower()
-                            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
-                                continue
+                            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']): continue
                             if img_url not in seen_urls:
                                 valid_urls.append(img_url)
                                 seen_urls.add(img_url)
                                 new_found += 1
-                                if len(valid_urls) >= target_count:
-                                    return valid_urls
+                                if len(valid_urls) >= target_count: return valid_urls
                     
-                    if new_found == 0:
-                        break
+                    if new_found == 0: break
                     first += 35 
-                    
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.error(f"Bing 翻页兜底抓取发生网络或超时异常: {e}")
+        logger.error(f"Bing 翻页抓取发生网络或超时异常: {e}")
     except Exception as e:
-        logger.error(f"Bing 翻页兜底抓取发生未知异常: {e}")
+        logger.error(f"Bing 翻页抓取发生未知异常: {e}")
         
     return valid_urls
 
 async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], str]:
     valid_urls = []
     error_msg = ""
+    context = None
     
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                viewport={'width': 1920, 'height': 1080}
-            )
-            page = await context.new_page()
-            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        browser = await get_browser()
+        # 🚀 每次只开辟轻量级 Context，复用底层 Browser 🚀
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
+        page = await context.new_page()
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        try:
+            search_url = f"https://www.soutushenqi.com/image/search?searchWord={urllib.parse.quote(keyword)}"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
             
-            try:
-                search_url = f"https://www.soutushenqi.com/image/search?searchWord={urllib.parse.quote(keyword)}"
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
+            for _ in range(SCROLL_TIMES):
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 
-                for _ in range(SCROLL_TIMES):
-                    await page.wait_for_timeout(SCROLL_WAIT)
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                # 软性网络空闲等待，若瀑布流持续发包导致超时则强行继续，不抛出异常
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=SCROLL_WAIT)
+                except PlaywrightTimeoutError:
+                    pass
+                
+                html_content = await page.content()
+                raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
+                
+                for u in raw_urls:
+                    if '%3A%2F%2F' in u: u = urllib.parse.unquote(u)
+                    if not u.startswith("http") or 'soutushenqi.com' in u: continue
+                    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: continue
                     
-                    html_content = await page.content()
-                    raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
-                    
-                    for u in raw_urls:
-                        if '%3A%2F%2F' in u:
-                            u = urllib.parse.unquote(u)
-                        if not u.startswith("http") or 'soutushenqi.com' in u:
-                            continue
-                        if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
-                            continue
+                    low_u = u.lower()
+                    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): continue
+                    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
                         
-                        low_u = u.lower()
-                        if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
-                            continue
-                        if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-                            continue
-                            
-                        clean_url = u.split('@')[0].rstrip('.,;)')
-                        if clean_url not in valid_urls:
-                            valid_urls.append(clean_url)
-                        if len(valid_urls) >= target_count:
-                            break
-                    if len(valid_urls) >= target_count:
-                        break
+                    clean_url = u.split('@')[0].rstrip('.,;)')
+                    if clean_url not in valid_urls:
+                        valid_urls.append(clean_url)
+                    if len(valid_urls) >= target_count: break
+                if len(valid_urls) >= target_count: break
 
-                if not valid_urls:
-                    error_msg = "未能匹配到符合白名单规则的高清第三方图片URL。"
-                    
-            except PlaywrightTimeoutError as e:
-                logger.warning(f"搜图主源节点交互超时: {str(e)}")
-            except PlaywrightError as e:
-                logger.warning(f"搜图主源底层通讯异常: {str(e)}")
-            finally:
-                await browser.close()
+            if not valid_urls:
+                error_msg = "未能匹配到符合白名单规则的高清第三方图片URL。"
                 
+        except PlaywrightTimeoutError as e:
+            logger.warning(f"搜图主源节点交互超时: {str(e)}")
+        except PlaywrightError as e:
+            logger.warning(f"搜图主源底层通讯异常: {str(e)}")
+            
     except Exception as e:
-        logger.error(f"Playwright 环境启动与挂载全局崩溃: {str(e)}")
+        logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
+    finally:
+        # 🚀 无论成败，必须清理 Context 释放内存 🚀
+        if context:
+            await context.close()
             
     return valid_urls[:target_count], error_msg
