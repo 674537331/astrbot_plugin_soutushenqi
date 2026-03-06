@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import io
+import re
+import urllib.parse
 import aiohttp
 from playwright.async_api import async_playwright
 
@@ -9,18 +11,17 @@ from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
-@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器插件：支持详细报错输出与手机端伪装", "v1.0.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "搜图神器插件：正则降维打击版", "v1.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
     async def _get_image_url_from_web(self, keyword: str) -> tuple[str, str]:
         """
-        核心逻辑：使用带伪装的 Playwright 抓取。
-        返回 tuple: (高清图URL, 错误信息详情)
+        核心逻辑：使用正则暴力匹配网页源码中的所有外链图片
         """
         async with async_playwright() as p:
-            # 【反反爬升级】启动无头浏览器，伪装特征
+            # 启动无头浏览器，伪装特征
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -30,15 +31,13 @@ class SouTuShenQiPlugin(Star):
                 ]
             )
             
-            # 使用手机设备的 User-Agent 往往能绕过很多风控，且页面更简单
+            # 换回电脑端 UA，电脑端返回的高清数据更完整
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-                viewport={'width': 390, 'height': 844}
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={'width': 1920, 'height': 1080}
             )
             
             page = await context.new_page()
-            
-            # 注入脚本，进一步隐藏自动控制特征
             await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             error_msg = ""
@@ -48,43 +47,53 @@ class SouTuShenQiPlugin(Star):
                 search_url = f"https://www.soutushenqi.com/image/search?searchWord={keyword}"
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
                 
-                # 暴力下拉到底部，连续拉3次，彻底触发懒加载
-                for _ in range(3):
-                    await page.wait_for_timeout(1000)
+                valid_urls = []
+                html_content = ""
+                
+                # 循环最多 4 次，边滚动边用正则扫描网页源码
+                for attempt in range(4):
+                    await page.wait_for_timeout(2000)
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                
-                await page.wait_for_timeout(2000)
-
-                # 暴力提取页面所有图片
-                img_urls = await page.evaluate('''() => {
-                    const imgs = Array.from(document.querySelectorAll("img"));
-                    return imgs.map(img => {
-                        return img.getAttribute("data-src") || img.getAttribute("src") || img.src;
-                    }).filter(url => url && url.startsWith("http"));
-                }''')
-                
-                # 最严格的白名单：只要外链壁纸
-                valid_urls = [
-                    src for src in img_urls 
-                    if 'soutushenqi.com' not in src 
-                    and 'avatar' not in src 
-                    and 'logo' not in src.lower()
-                    and 'icon' not in src.lower()
-                    and '.png' not in src.lower()
-                    and '.gif' not in src.lower()
-                ]
+                    
+                    # 获取网页当前的全部源码（包括所有动态生成的 JS 变量和 DOM）
+                    html_content = await page.content()
+                    
+                    # 【核武器：正则表达式】
+                    # 匹配所有常规 HTTP 链接，以及被 URL 编码的链接 (https%3A%2F%2F...)
+                    raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
+                    
+                    for u in raw_urls:
+                        # 如果是被编码的链接 (如 largeUrl=...)，将其解码还原
+                        if '%3A%2F%2F' in u:
+                            u = urllib.parse.unquote(u)
+                            
+                        if not u.startswith("http"): continue
+                        if 'soutushenqi.com' in u: continue # 排除官方域名
+                        
+                        low_u = u.lower()
+                        # 排除没用的图标
+                        if 'avatar' in low_u or 'logo' in low_u or 'icon' in low_u or 'qrcode' in low_u: 
+                            continue
+                            
+                        # 最严格的白名单：必须带有主流图片格式的后缀
+                        if not any(ext in low_u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                            continue
+                            
+                        valid_urls.append(u)
+                        
+                    # 只要抓到了有效的第三方壁纸，立刻跳出循环，不再死等！
+                    if valid_urls:
+                        break
 
                 if not valid_urls:
-                    # 获取当前页面的纯文本，用于 QQ 输出诊断
-                    page_text = await page.evaluate("document.body.innerText")
-                    error_msg = f"未找到壁纸。\n[页面前100个字符]: {page_text[:100]}\n[提取到的原始链接(前5个)]: {img_urls[:5]}"
+                    error_msg = f"未找到壁纸。\n[尝试次数]: {attempt+1}\n[源码长度]: {len(html_content)}\n[提取到的正则链接(前5个)]: {raw_urls[:5] if 'raw_urls' in locals() else '无'}"
                     logger.warning(f"搜图页面异常: {error_msg}")
                     return "", error_msg
 
-                # 拿到第一张，并去掉压缩后缀还原大图 (例如 @1192w.webp)
+                # 拿到第一张图，并切掉 B站等图床可能带有的缩略图参数（@1192w.webp）
                 raw_url = valid_urls[0]
                 hd_url = raw_url.split('@')[0]
-                logger.info(f"【成功提取！】高清原图链接: {hd_url}")
+                logger.info(f"【降维打击成功！】高清原图链接: {hd_url}")
                 
             except Exception as e:
                 error_msg = f"Playwright 发生异常: {str(e)}"
@@ -95,9 +104,6 @@ class SouTuShenQiPlugin(Star):
             return hd_url, error_msg
 
     async def _download_to_memory(self, url: str) -> bytes:
-        """
-        将图片下载到内存中，不占用服务器硬盘空间
-        """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.soutushenqi.com/"
@@ -115,16 +121,11 @@ class SouTuShenQiPlugin(Star):
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str):
-        """
-        用户手动调用的指令：/搜图 [关键词]
-        """
         yield event.plain_result(f"🔍 正在前往搜图神器寻找【{keyword}】的高清图片，请稍等片刻...")
         
-        # 获取图片 URL 和详细报错
         hd_url, err_msg = await self._get_image_url_from_web(keyword)
         
         if not hd_url:
-            # 直接在 QQ 输出诊断信息
             reply = f"😭 抱歉，抓取失败了！\n\n【诊断日志】\n{err_msg}"
             yield event.plain_result(reply)
             return
