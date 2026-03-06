@@ -2,12 +2,10 @@
 import base64
 import json
 import re
-import logging
 import textwrap
 import asyncio
 from astrbot.api.provider import Provider
-
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
@@ -30,15 +28,14 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         }}
     """).strip()
     
-    # 融合 PicSearch 优点：加入 3 次重试机制以对抗 VLM 不稳定的 JSON 输出
     retries = 3
     for attempt in range(retries):
         try:
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
             result_text = response.result_chain.get_plain_text()
             
-            # 1. 解析标准 JSON
-            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            # 1. 解析标准 JSON (改用 .*? 非贪婪模式防止跨越匹配)
+            json_match = re.search(r'\{.*?\}', result_text, re.DOTALL)
             if json_match:
                 try:
                     data = json.loads(json_match.group(0))
@@ -47,8 +44,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                         return index - 1
                     elif index == 0:
                         return -1  # 触发一票否决
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.debug(f"VLM JSON 解析失败: {e}, 原始内容片段: {json_match.group(0)}")
                     
             # 2. 降级正则提取策略
             numbers = re.findall(r'\d+', result_text)
