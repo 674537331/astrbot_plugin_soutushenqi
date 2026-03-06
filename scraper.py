@@ -10,17 +10,30 @@ PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
 SCROLL_WAIT = 1000
 
-# --- 全局资源管理器 ---
+# --- 全局资源懒加载管理器 ---
 _playwright_mgr = None
 _browser: Browser = None
-_browser_lock = asyncio.Lock()
+_browser_lock = None
 
 _scraper_session = None
-_scraper_session_lock = asyncio.Lock()
+_scraper_session_lock = None
+
+async def _get_browser_lock():
+    global _browser_lock
+    if _browser_lock is None:
+        _browser_lock = asyncio.Lock()
+    return _browser_lock
+
+async def _get_scraper_session_lock():
+    global _scraper_session_lock
+    if _scraper_session_lock is None:
+        _scraper_session_lock = asyncio.Lock()
+    return _scraper_session_lock
 
 async def get_browser() -> Browser:
     global _playwright_mgr, _browser
-    async with _browser_lock:
+    lock = await _get_browser_lock()
+    async with lock:
         if _browser is None:
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
@@ -40,27 +53,55 @@ async def get_browser() -> Browser:
 
 async def get_scraper_session() -> aiohttp.ClientSession:
     global _scraper_session
-    async with _scraper_session_lock:
+    lock = await _get_scraper_session_lock()
+    async with lock:
         if _scraper_session is None or _scraper_session.closed:
             _scraper_session = aiohttp.ClientSession()
     return _scraper_session
 
 async def close_browser():
+    """安全独立地关闭浏览器和管理器，防止僵尸进程"""
     global _playwright_mgr, _browser
-    async with _browser_lock:
+    lock = await _get_browser_lock()
+    async with lock:
         if _browser:
-            await _browser.close()
-            _browser = None
+            try:
+                await _browser.close()
+            except Exception as e:
+                logger.error(f"关闭底层 Browser 实例时发生异常: {e}")
+            finally:
+                _browser = None
+                
         if _playwright_mgr:
-            await _playwright_mgr.stop()
-            _playwright_mgr = None
+            try:
+                await _playwright_mgr.stop()
+            except Exception as e:
+                logger.error(f"关闭 Playwright Manager 时发生异常: {e}")
+            finally:
+                _playwright_mgr = None
 
 async def close_scraper_session():
     global _scraper_session
-    async with _scraper_session_lock:
+    lock = await _get_scraper_session_lock()
+    async with lock:
         if _scraper_session and not _scraper_session.closed:
             await _scraper_session.close()
             _scraper_session = None
+
+def is_valid_image_url(u: str) -> bool:
+    """提取 URL 过滤辅助函数，提升可读性"""
+    if '%3A%2F%2F' in u:
+        u = urllib.parse.unquote(u)
+    if not u.startswith("http") or 'soutushenqi.com' in u:
+        return False
+    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
+        return False
+    low_u = u.lower()
+    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
+        return False
+    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+        return False
+    return True
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     headers = {
@@ -126,7 +167,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             
             for _ in range(SCROLL_TIMES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                
                 try:
                     await page.wait_for_load_state("networkidle", timeout=SCROLL_WAIT)
                 except PlaywrightTimeoutError:
@@ -136,24 +176,14 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                 raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
                 
                 for u in raw_urls:
-                    if '%3A%2F%2F' in u:
-                        u = urllib.parse.unquote(u)
-                    if not u.startswith("http") or 'soutushenqi.com' in u:
-                        continue
-                    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
-                        continue
-                    
-                    low_u = u.lower()
-                    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
-                        continue
-                    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-                        continue
-                        
-                    clean_url = u.split('@')[0].rstrip('.,;)')
-                    if clean_url not in valid_urls:
-                        valid_urls.append(clean_url)
-                    if len(valid_urls) >= target_count:
-                        break
+                    if is_valid_image_url(u):
+                        clean_url = u.split('@')[0].rstrip('.,;)')
+                        if '%3A%2F%2F' in clean_url:
+                            clean_url = urllib.parse.unquote(clean_url)
+                        if clean_url not in valid_urls:
+                            valid_urls.append(clean_url)
+                        if len(valid_urls) >= target_count:
+                            break
                 if len(valid_urls) >= target_count:
                     break
 
