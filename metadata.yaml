@@ -1,0 +1,5 @@
+name: astrbot_plugin_soutushenqi
+desc: 基于无头浏览器和搜图神器的聚合搜图插件，支持大模型自然语言调用。
+version: v1.0.0
+author: YourName
+astrbot_version: ">=4.0.0"
