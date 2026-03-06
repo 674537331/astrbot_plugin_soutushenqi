@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import re
-import json
 import urllib.parse
 import aiohttp
 from playwright.async_api import async_playwright
@@ -13,47 +12,60 @@ SCROLL_TIMES = 4
 SCROLL_WAIT = 1500
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
-    url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}"
+    """融合 PicSearch 优点：支持异步翻页的 Bing 强力抓取"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     valid_urls = []
+    seen_urls = set()
+    first = 0
     
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
+            # 加入翻页循环，保障能抓满 target_count
+            while len(valid_urls) < target_count:
+                url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status != 200:
+                        break
+                        
                     html = await resp.text()
                     matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://.*?)(?:"|&quot;)', html)
+                    new_found = 0
+                    
                     for img_url in matches:
                         if img_url and img_url.startswith("http"):
                             low_u = img_url.lower()
-                            if any(x in low_u for x in ['avatar', 'logo', 'icon']):
+                            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
                                 continue
-                            if img_url not in valid_urls:
+                            if img_url not in seen_urls:
                                 valid_urls.append(img_url)
-                            if len(valid_urls) >= target_count:
-                                break
+                                seen_urls.add(img_url)
+                                new_found += 1
+                                if len(valid_urls) >= target_count:
+                                    return valid_urls
+                    
+                    if new_found == 0:
+                        break # 如果这一页没新图了，跳出循环防死循环
+                    first += 35 # Bing 默认每页约 35 张
+                    
     except Exception as e:
-        logger.error(f"Bing 兜底抓取发生异常: {e}")
+        logger.error(f"Bing 翻页兜底抓取发生异常: {e}")
         
     return valid_urls
 
 async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], str]:
+    """保留强力 Playwright 主源防反爬逻辑"""
     valid_urls = []
     error_msg = ""
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox'
-            ]
+            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
         )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
@@ -72,8 +84,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                 
                 for u in raw_urls:
                     if '%3A%2F%2F' in u: u = urllib.parse.unquote(u)
-                    if not u.startswith("http"): continue
-                    if 'soutushenqi.com' in u: continue
+                    if not u.startswith("http") or 'soutushenqi.com' in u: continue
                     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: continue
                     
                     low_u = u.lower()
