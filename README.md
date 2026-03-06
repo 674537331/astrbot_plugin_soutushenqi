@@ -99,8 +99,17 @@ astrbot_plugin_soutushenqi/
 
 ---
 
-## 🤝 致谢与贡献
+## 🤝 致谢
 
-如果您在使用中遇到了变态级的图床防盗链，欢迎提交 **Issue** 补充规则，或提交 **Pull Request**。
+* [@RC-CHN](https://github.com/RC-CHN) -  `astrbot_plugin_pic_search` 架构灵感
+
+
+## 📄 许可证
+
+本项目采用 **AGPL-3.0 License** 开源协议 - 详见 [LICENSE](LICENSE) 文件。
+
+---
+
+如果您发现这个插件对您有所帮助，请给一个 ⭐ **Star** 以示支持！
 
 如果这个插件对你有帮助，请给个 ⭐ **Star** 支持一下！
