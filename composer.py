@@ -8,7 +8,26 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from astrbot.api import logger
 
 TILE_SIZE = 300
-MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 防 OOM 安全阈值：20MB
+MAX_IMAGE_SIZE = 20 * 1024 * 1024  
+
+# --- 全局 Session 管理器 ---
+_composer_session = None
+_composer_session_lock = asyncio.Lock()
+
+async def get_composer_session() -> aiohttp.ClientSession:
+    global _composer_session
+    async with _composer_session_lock:
+        if _composer_session is None or _composer_session.closed:
+            # 移除全局总超时，依赖单次请求的 timeout
+            _composer_session = aiohttp.ClientSession()
+    return _composer_session
+
+async def close_composer_session():
+    global _composer_session
+    async with _composer_session_lock:
+        if _composer_session and not _composer_session.closed:
+            await _composer_session.close()
+            _composer_session = None
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
     async with semaphore:
@@ -35,10 +54,9 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     if 'text/html' in content_type:
                         return None
                     
-                    # 修复：强力防御巨大恶意文件导致的内存溢出 (OOM)
                     content_length = int(resp.headers.get('Content-Length', 0))
                     if content_length > MAX_IMAGE_SIZE:
-                        logger.warning(f"下载拒绝：目标文件超出安全大小 ({content_length} bytes): {url}")
+                        logger.warning(f"下载拒绝：目标文件超出安全大小: {url}")
                         return None
                         
                     return await resp.read()
@@ -46,15 +64,20 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.debug(f"并发下载时网络连接或超时失败 ({url}): {e}")
             return None
+        except asyncio.CancelledError:
+            # 修复：防掩盖异步取消信号
+            raise
         except Exception as e:
             logger.debug(f"并发下载时发生未知异常 ({url}): {e}")
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
     semaphore = asyncio.Semaphore(10) 
-    async with aiohttp.ClientSession() as session:
-        tasks = [download_image(session, semaphore, url) for url in urls]
-        results = await asyncio.gather(*tasks)
+    session = await get_composer_session()
+    
+    tasks = [download_image(session, semaphore, url) for url in urls]
+    results = await asyncio.gather(*tasks)
+        
     return [(u, r) for u, r in zip(urls, results) if r]
 
 def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
@@ -69,7 +92,8 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         except (IOError, UnidentifiedImageError):
             continue
 
-    if not successful_images: return None, []
+    if not successful_images:
+        return None, []
 
     columns = math.ceil(math.sqrt(len(successful_images)))
     rows = math.ceil(len(successful_images) / columns)
@@ -87,7 +111,6 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         draw.rectangle(bg_box, fill="black")
         draw.text((x_offset + 15, y_offset + 15), str(i + 1), fill="white", font=font, anchor="mm")
 
-    # 修复：安全释放 BytesIO 内存
     with io.BytesIO() as buffer:
         collage.save(buffer, format="JPEG", quality=85)
         return buffer.getvalue(), valid_items
