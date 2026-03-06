@@ -97,7 +97,8 @@ astrbot_plugin_soutushenqi/
 └── vlm.py              # 模型交互模块（Prompt 构建与 JSON 解析兜底）
 ```
 
-🤝 致谢与贡献
+## 🤝 致谢与贡献
+
 如果您在使用中遇到了变态级的图床防盗链，欢迎提交 Issue 补充规则，或提交 Pull Request。
 
 如果这个插件对你有帮助，请给个 ⭐ Star 支持一下！
