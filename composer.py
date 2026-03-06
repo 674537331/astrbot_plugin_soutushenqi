@@ -5,13 +5,11 @@ import asyncio
 import aiohttp
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-import logging
-
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger
 
 TILE_SIZE = 300
 
-async def download_image(url: str) -> Optional[bytes]:
+async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[bytes]:
     referer = "https://www.google.com/"
     if 'baidu.com' in url or 'bdimg.com' in url:
         referer = "https://image.baidu.com/"
@@ -27,21 +25,23 @@ async def download_image(url: str) -> Optional[bytes]:
     }
     
     try:
-        # 加入连接超时，防止卡死
-        timeout = aiohttp.ClientTimeout(total=15, connect=5)
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    content_type = resp.headers.get('Content-Type', '').lower()
-                    if 'text/html' in content_type: return None
-                    return await resp.read()
-                return None
-    except Exception:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 200:
+                content_type = resp.headers.get('Content-Type', '').lower()
+                if 'text/html' in content_type:
+                    return None
+                return await resp.read()
+            return None
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.debug(f"并发下载时网络连接失败 ({url}): {e}")
         return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    tasks = [download_image(url) for url in urls]
-    results = await asyncio.gather(*tasks)
+    # 统一复用 ClientSession 连接池，大幅降低并发开销
+    timeout = aiohttp.ClientTimeout(total=15, connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        tasks = [download_image(session, url) for url in urls]
+        results = await asyncio.gather(*tasks)
     return [(u, r) for u, r in zip(urls, results) if r]
 
 def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
@@ -56,7 +56,8 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         except (IOError, UnidentifiedImageError):
             continue
 
-    if not successful_images: return None, []
+    if not successful_images:
+        return None, []
 
     columns = math.ceil(math.sqrt(len(successful_images)))
     rows = math.ceil(len(successful_images) / columns)
