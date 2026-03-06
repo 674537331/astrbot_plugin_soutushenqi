@@ -14,9 +14,9 @@ import logging
 logger = logging.getLogger("astrbot")
 
 async def download_image(url: str) -> Optional[bytes]:
-    """下载单张图片到内存中"""
+    """下载单张图片到内存中。若发生防盗链或非图片资源则返回 None。"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -30,10 +30,8 @@ async def download_image(url: str) -> Optional[bytes]:
         logger.error(f"图片下载失败 ({url}): {e}")
     return None
 
-def _create_collage_sync(image_bytes_list: list[bytes], valid_urls: list[str]) -> tuple[Optional[bytes], list[str]]:
-    """
-    同步拼接网格图。运行于独立线程以防止阻塞异步事件循环。
-    """
+def _create_collage_sync(image_bytes_list: list[Optional[bytes]], valid_urls: list[str]) -> tuple[Optional[bytes], list[str]]:
+    """同步拼接网格图。自动跳过下载失败的图片。"""
     successful_images = []
     successful_urls = []
     tile_size = 300
@@ -51,7 +49,6 @@ def _create_collage_sync(image_bytes_list: list[bytes], valid_urls: list[str]) -
     if not successful_images:
         return None, []
 
-    # 计算网格行列数
     columns = math.ceil(math.sqrt(len(successful_images)))
     rows = math.ceil(len(successful_images) / columns)
     
@@ -64,7 +61,6 @@ def _create_collage_sync(image_bytes_list: list[bytes], valid_urls: list[str]) -
         x_offset, y_offset = col * tile_size, row * tile_size
         collage.paste(img, (x_offset, y_offset))
         
-        # 绘制黑底白字的序号标签
         label = str(i + 1)
         bg_box = [x_offset + 5, y_offset + 5, x_offset + 35, y_offset + 35]
         draw.rectangle(bg_box, fill="black")
