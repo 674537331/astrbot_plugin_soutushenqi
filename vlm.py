@@ -40,8 +40,12 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 clean_text = re.sub(r'^```json|```$', '', result_text, flags=re.MULTILINE).strip()
                 data = json.loads(clean_text)
                 index = int(data.get("best_index", 1))
+                
+                # 修复：防止超范围序号静默穿透
+                if index == 0: return -1 
                 if 1 <= index <= total_count: return index - 1
-                elif index == 0: return -1 
+                raise ValueError(f"JSON 提取的序号 {index} 超出有效范围 0-{total_count}")
+                
             except json.JSONDecodeError as e:
                 logger.debug(f"VLM JSON 解析失败: {e}, 原始内容片段: {result_text}")
                     
@@ -56,10 +60,12 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 if numbers:
                     index = int(numbers[-1]) # 如果模型话多，通常最后一句是结论
                 else:
-                    raise ValueError(f"无法从大模型回复中提取合法序号。原始内容: {result_text}")
+                    raise ValueError(f"无法从大模型回复中提取任何合法序号。原始内容: {result_text}")
                     
+            # 修复：防止超范围序号静默穿透
             if index == 0: return -1
             if 1 <= index <= total_count: return index - 1
+            raise ValueError(f"正则提取的序号 {index} 超出有效范围 0-{total_count}")
                     
         except Exception as e:
             logger.warning(f"VLM 选择过程发生异常 (尝试 {attempt + 1}/{retries}): {e}")
