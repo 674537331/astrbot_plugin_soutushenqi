@@ -8,9 +8,9 @@ from astrbot.api import logger
 
 PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
-SCROLL_WAIT = 1000  # 缩短硬等待时间，交由 networkidle 动态等待
+SCROLL_WAIT = 1000
 
-# 🚀 全局浏览器单例管理 🚀
+# 全局浏览器单例管理
 _playwright_mgr = None
 _browser: Browser = None
 
@@ -80,7 +80,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     
     try:
         browser = await get_browser()
-        # 🚀 每次只开辟轻量级 Context，复用底层 Browser 🚀
+        # 每次只开辟轻量级 Context，复用底层 Browser
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             viewport={'width': 1920, 'height': 1080}
@@ -95,7 +95,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             for _ in range(SCROLL_TIMES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 
-                # 软性网络空闲等待，若瀑布流持续发包导致超时则强行继续，不抛出异常
+                # 软性网络空闲等待
                 try:
                     await page.wait_for_load_state("networkidle", timeout=SCROLL_WAIT)
                 except PlaywrightTimeoutError:
@@ -130,7 +130,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     except Exception as e:
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
-        # 🚀 无论成败，必须清理 Context 释放内存 🚀
+        # 无论成败，必须清理 Context 释放内存
         if context:
             await context.close()
             
