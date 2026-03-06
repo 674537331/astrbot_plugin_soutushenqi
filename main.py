@@ -85,6 +85,12 @@ class SouTuShenQiPlugin(Star):
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.config.get("enable_explanation_image", True):
-            instruction = "\n【核心工具调用规范】若用户询问具体实体（如XX是什么），请调用 search_image_tool 提供配图。"
+            instruction = (
+                "\n【核心工具调用绝对规范】\n"
+                "你当前拥有多个图片相关工具，必须严格遵守以下红线原则，绝不允许越界混用：\n"
+                "1. 【严格锁定搜图】：只要用户的原话中包含“搜图”、“找图”、“搜一张”、“给我看”等明确的搜索指令，你【必须且只能】调用 `search_image_tool`，绝不允许调用任何画图/生成图像的工具！此时 is_explanation=false。\n"
+                "2. 【百科科普配图】：若用户是疑问句询问“XX是什么/介绍XX”，你为了辅助科普，必须调用 `search_image_tool`，此时 is_explanation=true。\n"
+                "3. 【画图生成指令】：只有当用户明确说出“画一张”、“生成一张”、“做一张”时，你才能使用你的生图工具。"
+            )
             if instruction not in req.system_prompt:
                 req.system_prompt += instruction
