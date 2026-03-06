@@ -11,7 +11,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
     image_url = f"base64://{base64_str}"
 
-    # 🚀 强化了防废话和防 Markdown 的强制指令 🚀
     prompt = textwrap.dedent(f"""
         这是一张包含了 {total_count} 张图片的拼图网格，每张图片左上角都有一个数字编号。
         请仔细观察，并根据视觉需求描述：“{description}”，选出最符合要求的一张图片。
@@ -43,10 +42,10 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 index = int(data.get("best_index", 1))
                 if 1 <= index <= total_count: return index - 1
                 elif index == 0: return -1 
-            except json.JSONDecodeError:
-                pass # 交给降级正则处理
+            except json.JSONDecodeError as e:
+                logger.debug(f"VLM JSON 解析失败: {e}, 原始内容片段: {result_text}")
                     
-            # 2. 🚀 防御性极强的降级正则策略 🚀
+            # 2. 防御性极强的降级正则策略
             # 方案 A: 尝试提取形如 "best_index": 5 的残缺结构
             fallback_match = re.search(r'(?:"best_index"\s*:\s*)(\d+)', result_text)
             if fallback_match:
