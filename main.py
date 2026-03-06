@@ -138,13 +138,13 @@ class SouTuShenQiPlugin(Star):
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.config.get("enable_explanation_image", True):
             instruction = (
-                "\n【🔴 核心红线规范：搜图必须调用原生工具 🔴】\n"
-                "当用户要求搜图、找图或看图时，你【必须直接调用】 `search_image_tool` 这个 Function Tool。\n"
-                "【绝不允许】使用 `astrbot_execute_ipython` 等代码工具去模拟或打印搜图结果！！\n"
-                "参数填写指南：\n"
-                "1. `keyword`: 核心简练的搜索词（必填）。\n"
-                "2. `description`: 丰富的视觉描述，越详细越好（必填）。\n"
-                "3. `is_explanation`: 仅在回答“XX是什么”并需要配图辅助科普时设为 true，普通的搜图指令必须设为 false。"
+                "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
+                "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
+                "【绝对禁止以下违规行为】：\n"
+                "1. 严禁使用 `astrbot_execute_ipython` 写代码搜图！\n"
+                "2. 严禁使用 `astrbot_execute_shell` 通过 curl 或其他命令请求接口搜图！\n"
+                "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 格式的虚假图片链接！\n"
+                "你只需要在后台调用 `search_image_tool` 工具，填写 keyword 和 description 即可，系统会自动把图发给用户。"
             )
             if instruction not in req.system_prompt:
                 req.system_prompt += instruction
