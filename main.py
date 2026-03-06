@@ -15,7 +15,7 @@ from .vlm import select_best_image_index
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.3.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.4.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -49,13 +49,11 @@ class SouTuShenQiPlugin(Star):
             bing_urls = await fetch_bing_image_urls(keyword, batch_size)
             bing_items = await download_image_batch(bing_urls)
             
+            # 修复：避免修改原始列表引用，使用列表推导式创建新列表合并
             seen_urls = {u for u, _ in items}
-            for u, b in bing_items:
-                if u not in seen_urls:
-                    items.append((u, b))
-                    seen_urls.add(u)
+            new_bing_items = [(u, b) for u, b in bing_items if u not in seen_urls]
             
-            items = items[:batch_size]
+            items = (items + new_bing_items)[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对的总存活图片数: {len(items)}")
             
         return items
