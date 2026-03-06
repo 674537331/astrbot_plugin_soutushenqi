@@ -9,9 +9,8 @@ from astrbot.api import logger
 
 TILE_SIZE = 300
 
-# 增加信号量参数
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
-    # 🚀 获取信号量锁，限制并发请求数 🚀
+    # 获取信号量锁，限制并发请求数
     async with semaphore:
         referer = "https://www.google.com/"
         if 'baidu.com' in url or 'bdimg.com' in url:
@@ -41,7 +40,7 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
     timeout = aiohttp.ClientTimeout(total=15, connect=5)
-    # 🚀 设置并发安全阀：同时最多 10 个连接 🚀
+    # 设置并发安全阀：同时最多 10 个连接
     semaphore = asyncio.Semaphore(10) 
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
