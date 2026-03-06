@@ -3,14 +3,15 @@
 图像处理与下载模块
 重构版：解耦了下载与拼贴逻辑，提供并发批量下载。
 提取了魔法常量 TILE_SIZE。合规化了框架日志导入。
+修复：引入上下文管理器关闭图片对象，杜绝批量下载处理引发的 OOM (内存溢出) 问题。
 """
 import io
 import math
 import asyncio
 import aiohttp
 from typing import Optional
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-from astrbot.api import logger  # 修复：使用 AstrBot 官方接管的 logger
+from PIL import Image, ImageDraw, ImageFont
+from astrbot.api import logger
 
 # 将魔法数字提取为常量，未来如果改 16 宫格或大图版，只需改这里
 TILE_SIZE = 300
@@ -41,7 +42,6 @@ async def download_image(url: str) -> Optional[bytes]:
                     return await resp.read()
                 return None
     except Exception as e:
-        # 记录底层异常，防止彻底静默
         logger.debug(f"单图下载失败 ({url}): {e}")
         return None
 
@@ -61,11 +61,14 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
     
     for url, img_bytes in items:
         try:
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            img = img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
-            successful_images.append(img)
-            valid_items.append((url, img_bytes))
-        except (IOError, UnidentifiedImageError):
+            # 修复中等隐患：使用 with 语句确保底层文件和内存句柄被安全释放
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                # convert 会返回新图，原有 img 会被 with 安全关闭
+                rgb_img = img.convert("RGB")
+                resized_img = rgb_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+                successful_images.append(resized_img)
+                valid_items.append((url, img_bytes))
+        except OSError:  # 简化：UnidentifiedImageError 和 IOError 都是 OSError 的子类/别名
             continue
 
     if not successful_images:
