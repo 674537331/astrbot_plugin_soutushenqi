@@ -10,11 +10,9 @@ PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
 SCROLL_WAIT = 1000
 
-# --- 全局资源懒加载管理器 ---
 _playwright_mgr = None
 _browser: Browser = None
 _browser_lock = None
-
 _scraper_session = None
 _scraper_session_lock = None
 
@@ -34,7 +32,8 @@ async def get_browser() -> Browser:
     global _playwright_mgr, _browser
     lock = await _get_browser_lock()
     async with lock:
-        if _browser is None:
+        # 🚀 增强健康度检查：若进程意外死亡则重建 🚀
+        if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
                 _playwright_mgr = await async_playwright().start()
@@ -60,7 +59,6 @@ async def get_scraper_session() -> aiohttp.ClientSession:
     return _scraper_session
 
 async def close_browser():
-    """安全独立地关闭浏览器和管理器，防止僵尸进程"""
     global _playwright_mgr, _browser
     lock = await _get_browser_lock()
     async with lock:
@@ -89,7 +87,6 @@ async def close_scraper_session():
             _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
-    """提取 URL 过滤辅助函数，提升可读性"""
     if '%3A%2F%2F' in u:
         u = urllib.parse.unquote(u)
     if not u.startswith("http") or 'soutushenqi.com' in u:
@@ -103,14 +100,26 @@ def is_valid_image_url(u: str) -> bool:
         return False
     return True
 
+def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
+    """独立在线程池中执行正则匹配，防阻塞"""
+    raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
+    valid_urls = []
+    for u in raw_urls:
+        if is_valid_image_url(u):
+            clean_url = u.split('@')[0].rstrip('.,;)')
+            if '%3A%2F%2F' in clean_url:
+                clean_url = urllib.parse.unquote(clean_url)
+            if clean_url not in valid_urls:
+                valid_urls.append(clean_url)
+            if len(valid_urls) >= target_count:
+                break
+    return valid_urls
+
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     valid_urls = []
     seen_urls = set()
     first = 0
-    
     session = await get_scraper_session()
     
     try:
@@ -134,16 +143,15 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                             new_found += 1
                             if len(valid_urls) >= target_count:
                                 return valid_urls
-                
                 if new_found == 0:
                     break
                 first += 35 
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.error(f"Bing 翻页抓取发生网络或超时异常: {e}")
+        logger.error(f"Bing 翻页抓取异常: {e}")
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger.error(f"Bing 翻页抓取发生未知异常: {e}")
+        logger.error(f"Bing 翻页抓取未知异常: {e}")
         
     return valid_urls
 
@@ -173,17 +181,9 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                     pass
                 
                 html_content = await page.content()
-                raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
-                
-                for u in raw_urls:
-                    if is_valid_image_url(u):
-                        clean_url = u.split('@')[0].rstrip('.,;)')
-                        if '%3A%2F%2F' in clean_url:
-                            clean_url = urllib.parse.unquote(clean_url)
-                        if clean_url not in valid_urls:
-                            valid_urls.append(clean_url)
-                        if len(valid_urls) >= target_count:
-                            break
+                # 🚀 避免在主线程中执行可能回溯爆炸的长文本正则搜索 🚀
+                loop = asyncio.get_running_loop()
+                valid_urls = await loop.run_in_executor(None, _extract_urls_from_html_sync, html_content, target_count)
                 if len(valid_urls) >= target_count:
                     break
 
@@ -201,6 +201,10 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
         if context:
-            await context.close()
+            # 🚀 独立包裹，防二次崩溃 🚀
+            try:
+                await context.close()
+            except Exception as e:
+                logger.error(f"清理浏览器上下文时发生异常: {e}")
             
     return valid_urls[:target_count], error_msg
