@@ -3,13 +3,14 @@
 模型交互模块
 使用 textwrap.dedent 完美消除前导空格。
 修复：合规化日志，优化大模型正则降级提取的 Edge Case。
+修复：将 JSON 正则匹配改为非贪婪模式，彻底解决带有前后缀杂乱文本导致解析崩溃的问题。
 """
 import base64
 import json
 import re
 import textwrap
 from astrbot.api.provider import Provider
-from astrbot.api import logger  # 修复：使用 AstrBot 官方接管的 logger
+from astrbot.api import logger
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, keyword: str, total_count: int) -> int:
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
@@ -32,8 +33,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, ke
         response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
         result_text = response.result_chain.get_plain_text()
         
-        # 1. 首先尝试解析标准 JSON
-        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        # 1. 首先尝试解析标准 JSON（修复严重漏洞：增加 '?' 改为非贪婪模式）
+        json_match = re.search(r'\{.*?\}', result_text, re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group(0))
@@ -43,7 +44,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, ke
             except json.JSONDecodeError:
                 pass
                 
-        # 2. 降级策略：正则提取（修复“在这9张图中选第2张”的漏洞）
+        # 2. 降级策略：正则提取
         numbers = re.findall(r'\d+', result_text)
         if numbers:
             # 过滤出符合范围内的合法序号
