@@ -39,7 +39,7 @@
     ```
 2.  克隆本仓库（或从插件市场直接安装）：
     ```bash
-    git clone [https://github.com/YourGitHub/astrbot_plugin_soutushenqi](https://github.com/YourGitHub/astrbot_plugin_soutushenqi)
+    git clone [https://github.com/674537331/astrbot_plugin_soutushenqi](https://github.com/674537331/astrbot_plugin_soutushenqi)
     ```
 3.  安装 Playwright 内核（若环境未安装）：
     ```bash
