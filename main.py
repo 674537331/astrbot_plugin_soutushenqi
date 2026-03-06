@@ -30,11 +30,15 @@ class SouTuShenQiPlugin(Star):
                 # 【重要修复】将 wait_until 从 "networkidle" 改为 "domcontentloaded" 避免死等超时
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
                 
-                # 【重要修复】增加图片加载的等待超时时间到 15000 毫秒
-                await page.wait_for_selector('img', timeout=15000)
-                
-                # 为了确保 Vue/React 等前端框架把图片渲染出来，稍微硬等待 1.5 秒
-                await page.wait_for_timeout(1500)
+                # 【新代码：智能等待真实搜索结果图片渲染】
+                # 循环检查页面，直到出现至少一张 src 不是官方自身域名的“外链图片”
+                await page.wait_for_function(
+                    '''() => {
+                        const imgs = Array.from(document.querySelectorAll("img"));
+                        return imgs.some(img => img.src && img.src.startsWith("http") && !img.src.includes("soutushenqi.com"));
+                    }''',
+                    timeout=15000
+                )
                 
                 # 执行 JS 获取所有图片的 src
                 img_srcs = await page.eval_on_selector_all(
