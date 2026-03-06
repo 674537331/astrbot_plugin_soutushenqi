@@ -3,6 +3,7 @@
 搜图神器插件总线
 包含了优雅的 Bing 混合补充机制。当主图库下载存活率 < 30% 时，无缝混入 Bing 搜图进行同台淘汰比对。
 极大地减少了冗余的重复下载，提升响应速度。修复了 Prompt 多轮对话无限叠加问题。
+修复：修正 LLM Tool 中的消息发送 API 调用方式，避免协程类型错误。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -108,8 +109,9 @@ class SouTuShenQiPlugin(Star):
         img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
         
         if img_bytes:
-            result_obj = event.chain_result([Comp.Image.fromBytes(img_bytes)])
-            await event.send(result_obj)
+            # 修复严重问题：直接调用 make_result().message 发送消息，而不是误传生成器对象
+            result_msg = event.make_result().message(Comp.Image.fromBytes(img_bytes))
+            await event.send(result_msg)
             
             if is_explanation:
                 return f"图片已成功发送给用户！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
@@ -128,6 +130,5 @@ class SouTuShenQiPlugin(Star):
                 "2. 若用户的原话是疑问句，在问你某个客观实体是什么（如：“xx是什么？”、“介绍一下XX”），你为了辅助科普去搜图时，才将 `is_explanation` 设置为 true！\n"
                 "3. 严禁对抽象概念搜图。严禁使用 astrbot_execute_ipython 编写代码搜图，必须且只能调用 `search_image_tool`！"
             )
-            # 防御性编程：防止在长程对话中无限追加相同 Prompt 导致 Token 爆炸
             if instruction not in req.system_prompt:
                 req.system_prompt += instruction
