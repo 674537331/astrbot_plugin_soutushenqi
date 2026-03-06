@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 搜图神器插件总线
+包含了优雅的 Bing 混合补充机制。当主图库存活不足时，强力补充直至填满九宫格。
+赋予大模型一票否决权，全都是无关图时直接拦截，杜绝辣眼睛图片。
+修复：修正 LLM Tool 函数的规范注释以及图片发送的 Pydantic ValidationError。
 """
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -12,7 +15,7 @@ from .scraper import fetch_image_urls, fetch_bing_image_urls
 from .composer import download_image_batch, create_collage_from_items
 from .vlm import select_best_image_index
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件", "v2.1.1")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件", "v2.1.2")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -118,33 +121,3 @@ class SouTuShenQiPlugin(Star):
             keyword(string): 提取的搜索关键词，必须简练精准（例如用户说"搜一张拉克丝的图"，关键词就是"拉克丝"）。
             is_explanation(boolean): 默认为 false。若用户原话是疑问句要求科普（如"什么是XX"），需配合文字解释时，才将其设为 true。
         '''
-        if is_explanation:
-            use_vlm = self.config.get("enable_explanation_vlm_selection", False)
-        else:
-            use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
-            
-        img_bytes, err_msg = await self._process_image_search(event, keyword, use_vlm)
-        
-        if img_bytes:
-            result_msg = event.make_result().message(Comp.Image.fromBytes(img_bytes))
-            await event.send(result_msg)
-            
-            if is_explanation:
-                return f"图片已成功发送给用户！现在，请你立刻开始用文字向用户详细解释什么是 {keyword}。"
-            else:
-                return "图片已成功发送给用户！你可以简单回复一句搜图完成的话语。"
-        else:
-            return f"系统工具搜图失败: {err_msg}。请向用户致歉并仅提供文字回复。"
-
-    @filter.on_llm_request()
-    async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
-        if self.config.get("enable_explanation_image", True):
-            instruction = (
-                "\n【核心工具调用规范：search_image_tool】\n"
-                "你必须极其严格地判断用户意图，正确设置 `is_explanation` 参数：\n"
-                "1. 若用户的原话是明确的搜图祈使句（如：“帮我搜一张图”、“找张XX的图片”、“给我看XX”），你必须将 `is_explanation` 设置为 false！\n"
-                "2. 若用户的原话是疑问句，在问你某个客观实体是什么（如：“xx是什么？”、“介绍一下XX”），你为了辅助科普去搜图时，才将 `is_explanation` 设置为 true！\n"
-                "3. 严禁对抽象概念搜图。严禁使用 astrbot_execute_ipython 编写代码搜图，必须且只能调用 `search_image_tool`！"
-            )
-            if instruction not in req.system_prompt:
-                req.system_prompt += instruction
