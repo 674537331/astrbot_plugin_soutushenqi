@@ -2,19 +2,21 @@
 """
 数据抓取模块
 新增：Bing 必应图片搜索兜底机制。清理了魔法数字，修复了正则标点问题，彻底拉黑百度图床。
-修复：合规化日志，将 Playwright 初始化放入 try 块中防备异常泄漏僵尸进程。
+强化黑名单过滤系统占位图、头像及公告。
 """
 import re
 import json
 import urllib.parse
 import aiohttp
 from playwright.async_api import async_playwright
-from astrbot.api import logger  # 修复：使用 AstrBot 官方接管的 logger
+from astrbot.api import logger
 
-# 抽离魔法常量，方便统一修改
 PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
 SCROLL_WAIT = 1500
+
+# 增强版黑名单：拦截各种头像、Logo、占位图、公告图
+BLACKLIST_WORDS = ['avatar', 'logo', 'icon', 'qrcode', 'notice', 'placeholder', 'default', 'thumb', 'profile']
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     """使用 aiohttp 抓取 Bing 图片作为兜底。"""
@@ -36,8 +38,11 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                             img_url = data.get("murl")
                             if img_url and img_url.startswith("http"):
                                 low_u = img_url.lower()
-                                if any(x in low_u for x in ['avatar', 'logo', 'icon']):
+                                
+                                # 增强过滤
+                                if any(x in low_u for x in BLACKLIST_WORDS):
                                     continue
+                                    
                                 valid_urls.append(img_url)
                                 if len(valid_urls) >= target_count:
                                     break
@@ -52,11 +57,10 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     """主抓取逻辑：优先尝试搜图神器（严禁百度）。"""
     valid_urls = []
     error_msg = ""
-    browser = None  # 提前声明，防止未初始化时就进入 finally 报错
+    browser = None 
     
     async with async_playwright() as p:
         try:
-            # 修复：全生命周期移入 try 块，防止 OOM 等异常导致僵尸进程
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -94,14 +98,14 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
                         continue
                     
                     low_u = u.lower()
-                    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
+                    # 增强过滤
+                    if any(x in low_u for x in BLACKLIST_WORDS):
                         continue
                         
                     if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
                         continue
                         
                     clean_url = u.split('@')[0]
-                    # 清除可能误匹配的尾部标点符号，防止引发 404
                     clean_url = clean_url.rstrip('.,;)')
                     
                     if clean_url not in valid_urls:
@@ -122,5 +126,4 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             if browser:
                 await browser.close()
             
-    # 如果没抓到足够的图，也会在 main.py 的逻辑中自动由 Bing 补齐
     return valid_urls[:target_count], error_msg
