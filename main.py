@@ -15,7 +15,7 @@ from .vlm import select_best_image_index
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.7.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.8.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -25,7 +25,7 @@ class SouTuShenQiPlugin(Star):
         await close_browser()
         await close_scraper_session()
         await close_composer_session()
-        logger.info("SouTuShenQi 插件资源(Browser/HttpSessions)回收完毕，安全卸载。")
+        logger.info("SouTuShenQi 插件资源回收完毕。")
 
     async def _get_vlm_provider(self, event: AstrMessageEvent):
         provider_id = self.config.get("vlm_provider_id", "")
@@ -48,10 +48,10 @@ class SouTuShenQiPlugin(Star):
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
-        logger.info(f"主来源下载完成，实际存活 {len(items)} 张。")
+        logger.info(f"主来源下载完成，存活 {len(items)} 张。")
 
         if len(items) < threshold:
-            logger.warning(f"主图床可用率过低 ({len(items)}/{batch_size})，启动 Bing 强力混合补充...")
+            logger.warning(f"主图源可用率低，启动 Bing 混合补充...")
             bing_urls = await fetch_bing_image_urls(keyword, batch_size)
             bing_items = await download_image_batch(bing_urls)
             
@@ -59,7 +59,7 @@ class SouTuShenQiPlugin(Star):
             new_bing_items = [(u, b) for u, b in bing_items if u not in seen_urls]
             
             items = (items + new_bing_items)[:batch_size]
-            logger.info(f"混合补充完毕，最终参与比对的总存活图片数: {len(items)}")
+            logger.info(f"混合补充完毕，最终参与比对数: {len(items)}")
             
         return items
 
@@ -74,8 +74,7 @@ class SouTuShenQiPlugin(Star):
             best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
             
             if best_idx == -1:
-                logger.warning("VLM 判定所有候选图均不符合要求，已一票否决。")
-                return "", b"", "检索到的图片均与要求无关，为保证质量已自动拦截。"
+                return "", b"", "检索到的图片均与要求无关，为保证质量已拦截。"
                 
             final_url, final_bytes = valid_items[best_idx]
             logger.info(f"VLM优胜决定：{final_url}")
@@ -84,37 +83,42 @@ class SouTuShenQiPlugin(Star):
             return valid_items[0][0], valid_items[0][1], ""
 
     def _format_image_sync(self, img_bytes: bytes) -> bytes:
-        """同步的核心图片转码逻辑 (供线程池调用)"""
         try:
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
                 if img.format not in ['JPEG', 'PNG']:
-                    img = img.convert("RGB")
+                    # 🚀 完美修复透明通道变黑问题 🚀
+                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                        alpha = img.convert('RGBA').split()[-1]
+                        bg = Image.new("RGB", img.size, (255, 255, 255)) # 用纯白垫底
+                        bg.paste(img, mask=alpha)
+                        img = bg
+                    else:
+                        img = img.convert("RGB")
+                        
                     with io.BytesIO() as buf:
                         img.save(buf, format="JPEG", quality=JPEG_QUALITY)
                         final_bytes = buf.getvalue()
-                    logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG。")
                     return final_bytes
                 return img_bytes
         except UnidentifiedImageError:
-            logger.warning("捕获到 UnidentifiedImageError，图片文件可能已损坏。")
+            logger.warning("捕获到 UnidentifiedImageError，图片文件损坏。")
             return img_bytes
         except OSError as e:
-            logger.warning(f"图片转码检测时发生IO格式错误: {e}")
+            logger.warning(f"图片转码发生IO格式错误: {e}")
             return img_bytes
         except Exception as e:
-            logger.error(f"图片转码检测时发生严重未知错误: {e}", exc_info=True)
+            logger.error(f"图片转码发生严重错误: {e}", exc_info=True)
             return img_bytes
 
     async def _format_image(self, img_bytes: bytes) -> bytes:
-        """异步包装器：防止 CPU 密集型任务阻塞事件循环"""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
         batch_size = self.config.get("batch_size", 16)
         eval_desc = description if description else keyword
-        logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}")
+        logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
         
         items = await self._ensure_minimum_images(keyword, batch_size)
         if not items:
@@ -134,14 +138,19 @@ class SouTuShenQiPlugin(Star):
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str, description: str = ""):
-        use_vlm = self.config.get("enable_cmd_vlm_selection", True)
-        yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
-        
-        img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
-        if img_bytes:
-            yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
-        else:
-            yield event.plain_result(f"搜图失败: {err_msg}")
+        # 🚀 增加外层异常兜底 🚀
+        try:
+            use_vlm = self.config.get("enable_cmd_vlm_selection", True)
+            yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
+            
+            img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
+            if img_bytes:
+                yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
+            else:
+                yield event.plain_result(f"搜图失败: {err_msg}")
+        except Exception as e:
+            logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
+            yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
@@ -153,24 +162,28 @@ class SouTuShenQiPlugin(Star):
             description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
             is_explanation (bool): 若用户要求科普或询问"什么是XX"时，才将其设为 true。
         """
-        if is_explanation:
-            use_vlm = self.config.get("enable_explanation_vlm_selection", False)
-        else:
-            use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
-            
-        img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
-        
-        if img_bytes:
-            message_result = event.make_result()
-            message_result.chain = [Comp.Image.fromBytes(img_bytes)]
-            await event.send(message_result) 
-            
+        try:
             if is_explanation:
-                return f"图片已成功发送！请立刻开始用文字向用户详细解释什么是 {keyword}。"
+                use_vlm = self.config.get("enable_explanation_vlm_selection", False)
             else:
-                return "图片已成功发送给用户！简单回复一句搜图完成的话语即可。"
-        else:
-            return f"系统搜图失败: {err_msg}。请向用户致歉并仅提供文字回复。"
+                use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
+                
+            img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
+            
+            if img_bytes:
+                message_result = event.make_result()
+                message_result.chain = [Comp.Image.fromBytes(img_bytes)]
+                await event.send(message_result) 
+                
+                if is_explanation:
+                    return f"图片已成功发送！请立刻开始向用户详细解释什么是 {keyword}。"
+                else:
+                    return "图片已发送！简单回复一句搜图完成的话语即可。"
+            else:
+                return f"系统搜图失败: {err_msg}。"
+        except Exception as e:
+            logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
+            return "系统错误导致搜图中断，请向用户致歉。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -180,9 +193,9 @@ class SouTuShenQiPlugin(Star):
                 "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
                 "【绝对禁止以下违规行为】：\n"
                 "1. 严禁使用 `astrbot_execute_ipython` 写代码搜图！\n"
-                "2. 严禁使用 `astrbot_execute_shell` 通过 curl 或其他命令请求接口搜图！\n"
-                "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 格式的虚假图片链接！\n"
-                "你只需要在后台调用 `search_image_tool` 工具，填写 keyword 和 description 即可，系统会自动把图发给用户。"
+                "2. 严禁使用 `astrbot_execute_shell` 搜图！\n"
+                "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 的虚假链接！\n"
+                "你只需要在后台调用 `search_image_tool` 工具即可。"
             )
             if instruction not in req.system_prompt:
                 req.system_prompt += instruction
