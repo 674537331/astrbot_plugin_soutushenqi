@@ -8,9 +8,9 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from astrbot.api import logger
 
 TILE_SIZE = 300
+MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 防 OOM 安全阈值：20MB
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
-    # 获取信号量锁，限制并发请求数
     async with semaphore:
         referer = "https://www.google.com/"
         if 'baidu.com' in url or 'bdimg.com' in url:
@@ -26,7 +26,6 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
         }
         
-        # 修复：将超时限制设定在单次请求上，而非整个 Session
         req_timeout = aiohttp.ClientTimeout(total=15, connect=5)
         
         try:
@@ -35,6 +34,13 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     content_type = resp.headers.get('Content-Type', '').lower()
                     if 'text/html' in content_type:
                         return None
+                    
+                    # 修复：强力防御巨大恶意文件导致的内存溢出 (OOM)
+                    content_length = int(resp.headers.get('Content-Length', 0))
+                    if content_length > MAX_IMAGE_SIZE:
+                        logger.warning(f"下载拒绝：目标文件超出安全大小 ({content_length} bytes): {url}")
+                        return None
+                        
                     return await resp.read()
                 return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -45,14 +51,10 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    # 设置并发安全阀：同时最多 10 个连接
     semaphore = asyncio.Semaphore(10) 
-    
-    # 修复：移除 Session 级别的绝对超时，防止排队任务被强制阻断
     async with aiohttp.ClientSession() as session:
         tasks = [download_image(session, semaphore, url) for url in urls]
         results = await asyncio.gather(*tasks)
-        
     return [(u, r) for u, r in zip(urls, results) if r]
 
 def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
@@ -85,9 +87,10 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         draw.rectangle(bg_box, fill="black")
         draw.text((x_offset + 15, y_offset + 15), str(i + 1), fill="white", font=font, anchor="mm")
 
-    buffer = io.BytesIO()
-    collage.save(buffer, format="JPEG", quality=85)
-    return buffer.getvalue(), valid_items
+    # 修复：安全释放 BytesIO 内存
+    with io.BytesIO() as buffer:
+        collage.save(buffer, format="JPEG", quality=85)
+        return buffer.getvalue(), valid_items
 
 async def create_collage_from_items(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
     loop = asyncio.get_running_loop()
