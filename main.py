@@ -7,41 +7,45 @@ from astrbot.api.provider import ProviderRequest
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 
+from .scraper import fetch_image_urls, fetch_bing_image_urls, close_browser, close_scraper_session
+from .composer import download_image_batch, create_collage_from_items, close_composer_session
+from .vlm import select_best_image_index
+
 # --- 常量定义区 ---
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.5.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.6.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
 
     async def terminate(self):
-        """当插件被禁用、更新或卸载时，自动清理常驻的无头浏览器资源"""
-        from .scraper import close_browser
+        """当插件被禁用、更新或卸载时，自动清理常驻的所有资源"""
         await close_browser()
-        logger.info("SouTuShenQi 插件资源回收完毕，安全卸载。")
+        await close_scraper_session()
+        await close_composer_session()
+        logger.info("SouTuShenQi 插件资源(Browser/HttpSessions)回收完毕，安全卸载。")
 
     async def _get_vlm_provider(self, event: AstrMessageEvent):
         provider_id = self.config.get("vlm_provider_id", "")
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
-            if provider: return provider
+            if provider:
+                return provider
         
-        # 修复：空指针防御与兜底
         umo = getattr(event, "unified_msg_origin", None)
         if umo:
             curr_id = await self.context.get_current_chat_provider_id(umo)
             if curr_id:
                 provider = self.context.get_provider_by_id(curr_id)
-                if provider: return provider
+                if provider:
+                    return provider
                 
-        # 终极兜底：如果没有获取到特定会话的提供商，回退到全局 llm
         return getattr(self.context, 'llm', None)
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        """子模块：负责基础图像获取与防盗链兜底"""
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
@@ -61,7 +65,6 @@ class SouTuShenQiPlugin(Star):
         return items
 
     async def _vlm_selection(self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str) -> tuple[str, bytes, str]:
-        """子模块：负责构建拼图与大模型淘汰比对"""
         collage_bytes, valid_items = await create_collage_from_items(items)
         if not collage_bytes or not valid_items:
             return "", b"", "图片拼合处理失败，可用图片的数据均已损坏。"
@@ -82,9 +85,7 @@ class SouTuShenQiPlugin(Star):
             return valid_items[0][0], valid_items[0][1], ""
 
     def _format_image(self, img_bytes: bytes) -> bytes:
-        """子模块：负责图片格式校验与安全转码"""
         try:
-            # 修复：使用 with 上下文管理器确保内存被主动释放
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
                 if img.format not in ['JPEG', 'PNG']:
@@ -92,24 +93,23 @@ class SouTuShenQiPlugin(Star):
                     with io.BytesIO() as buf:
                         img.save(buf, format="JPEG", quality=JPEG_QUALITY)
                         final_bytes = buf.getvalue()
-                    logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG，保障跨平台发送兼容性。")
+                    logger.info(f"图片(原格式 {img.format})已强制转码为 JPEG。")
                     return final_bytes
                 return img_bytes
         except UnidentifiedImageError:
-            logger.warning("捕获到 UnidentifiedImageError，图片文件可能已损坏或非合法图像格式。")
+            logger.warning("捕获到 UnidentifiedImageError，图片文件可能已损坏。")
             return img_bytes
         except OSError as e:
-            logger.warning(f"图片转码检测时发生IO格式错误 (将尝试发送原始数据): {e}")
+            logger.warning(f"图片转码检测时发生IO格式错误: {e}")
             return img_bytes
         except Exception as e:
             logger.warning(f"图片转码检测时发生未知错误: {e}")
             return img_bytes
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
-        """总调度管线"""
         batch_size = self.config.get("batch_size", 16)
         eval_desc = description if description else keyword
-        logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}, 期望数量: {batch_size}")
+        logger.info(f"发起搜图: [{keyword}], 描述: [{eval_desc}], VLM比对: {use_vlm_selection}")
         
         items = await self._ensure_minimum_images(keyword, batch_size)
         if not items:
