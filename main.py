@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
+import asyncio
 from PIL import Image, UnidentifiedImageError
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -11,18 +12,16 @@ from .scraper import fetch_image_urls, fetch_bing_image_urls, close_browser, clo
 from .composer import download_image_batch, create_collage_from_items, close_composer_session
 from .vlm import select_best_image_index
 
-# --- 常量定义区 ---
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.6.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v4.7.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
 
     async def terminate(self):
-        """当插件被禁用、更新或卸载时，自动清理常驻的所有资源"""
         await close_browser()
         await close_scraper_session()
         await close_composer_session()
@@ -84,7 +83,8 @@ class SouTuShenQiPlugin(Star):
         else:
             return valid_items[0][0], valid_items[0][1], ""
 
-    def _format_image(self, img_bytes: bytes) -> bytes:
+    def _format_image_sync(self, img_bytes: bytes) -> bytes:
+        """同步的核心图片转码逻辑 (供线程池调用)"""
         try:
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
@@ -103,8 +103,13 @@ class SouTuShenQiPlugin(Star):
             logger.warning(f"图片转码检测时发生IO格式错误: {e}")
             return img_bytes
         except Exception as e:
-            logger.warning(f"图片转码检测时发生未知错误: {e}")
+            logger.error(f"图片转码检测时发生严重未知错误: {e}", exc_info=True)
             return img_bytes
+
+    async def _format_image(self, img_bytes: bytes) -> bytes:
+        """异步包装器：防止 CPU 密集型任务阻塞事件循环"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
         batch_size = self.config.get("batch_size", 16)
@@ -124,7 +129,7 @@ class SouTuShenQiPlugin(Star):
             final_url, final_bytes = items[0]
             logger.info(f"跳过VLM，直接返回首张图：{final_url}")
 
-        final_bytes = self._format_image(final_bytes)
+        final_bytes = await self._format_image(final_bytes)
         return final_bytes, ""
 
     @filter.command("搜图")
