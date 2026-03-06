@@ -21,19 +21,19 @@ async def download_image(url: str) -> Optional[bytes]:
         referer = "https://www.bilibili.com/"
         
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": referer,
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
     }
     
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=15) as resp:
+        # 加入连接超时，防止卡死
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            async with session.get(url) as resp:
                 if resp.status == 200:
                     content_type = resp.headers.get('Content-Type', '').lower()
-                    # 防止图床报错页面伪装成图片流返回
-                    if 'text/html' in content_type:
-                        return None
+                    if 'text/html' in content_type: return None
                     return await resp.read()
                 return None
     except Exception:
