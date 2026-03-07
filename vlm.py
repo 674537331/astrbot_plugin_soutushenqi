@@ -8,6 +8,26 @@ import random
 from astrbot.api.provider import Provider
 from astrbot.api import logger
 
+def _extract_json_objects(text: str) -> list[str]:
+    """🚀 无敌的栈式括号平衡提取器：无视任何正则表达式回溯漏洞与嵌套陷阱 🚀"""
+    results = []
+    depth = 0
+    start = -1
+    for i, char in enumerate(text):
+        if char == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0 and start != -1:
+                results.append(text[start:i+1])
+                start = -1
+            elif depth < 0:
+                # 应对不平衡的大括号异常
+                depth = 0
+    return results
+
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
     if total_count <= 0:
         return -1
@@ -34,6 +54,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     """).strip()
     
     retries = 3
+    MAX_BACKOFF_TIME = 16.0  # 🚀 指数退避的天花板，防止无限挂起 🚀
+    
     for attempt in range(retries):
         try:
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
@@ -43,32 +65,25 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 🚀 彻底根除物理切片 BUG：退回高鲁棒性的正则块扫描，挨个尝试解析 🚀
-            try:
-                clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
-                
-                # 遍历文本中出现的所有像 JSON 的对象块（非贪婪匹配）
-                json_matches = re.findall(r'\{.*?\}', clean_text, re.DOTALL)
-                parsed_index = None
-                
-                for match_str in json_matches:
-                    try:
-                        data = json.loads(match_str)
-                        if "best_index" in data:
-                            parsed_index = int(data["best_index"])
-                            break 
-                    except json.JSONDecodeError:
-                        continue
-                        
-                if parsed_index is not None:
-                    if parsed_index == 0: return -1 
-                    if 1 <= parsed_index <= total_count: return parsed_index - 1
-                    raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
-                else:
-                    raise json.JSONDecodeError("遍历文本未找到合法 JSON", result_text, 0)
+            # 第一优先级：暴力平衡栈提取 JSON (彻底终结正则陷阱)
+            json_blocks = _extract_json_objects(result_text)
+            parsed_index = None
+            
+            for block in reversed(json_blocks): # 从后往前找，因为大模型习惯把总结放最后
+                try:
+                    data = json.loads(block)
+                    if "best_index" in data:
+                        parsed_index = int(data["best_index"])
+                        break 
+                except json.JSONDecodeError:
+                    continue
                     
-            except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
+            if parsed_index is not None:
+                if parsed_index == 0: return -1 
+                if 1 <= parsed_index <= total_count: return parsed_index - 1
+                raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
+                
+            logger.debug("VLM 响应未能通过物理提取解析，开启正则降级。")
                     
             # 2. 防御性极强的降级正则策略 (多冲突排查)
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
@@ -95,7 +110,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             logger.warning(f"VLM 选择异常 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                base_sleep = 2 ** attempt
+                # 🚀 带封顶的随机退避 🚀
+                base_sleep = min(2 ** attempt, MAX_BACKOFF_TIME)
                 jitter = random.uniform(0, 1)
                 await asyncio.sleep(base_sleep + jitter)
                 
