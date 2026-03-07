@@ -9,7 +9,6 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> list[str]:
-    """🚀 工业级防注栈式解析器：免疫所有内部嵌套和转义陷阱 🚀"""
     results = []
     depth = 0
     start = -1
@@ -45,7 +44,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     if total_count <= 0:
         return -1
 
-    # 🚀 CPU 解放：把沉重的 10MB Base64 编码踢进线程池 🚀
     loop = asyncio.get_running_loop()
     base64_str = await loop.run_in_executor(None, lambda: base64.b64encode(image_bytes).decode('utf-8'))
     image_url = f"base64://{base64_str}"
@@ -81,11 +79,9 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 第一优先级：调用工业级栈式解析器切块
             json_blocks = _extract_json_objects(result_text)
             parsed_index = None
             
-            # 从后往前找，因为大模型习惯把正确的结论放最后
             for block in reversed(json_blocks): 
                 try:
                     data = json.loads(block)
@@ -102,15 +98,13 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             logger.debug("VLM 响应未能通过物理提取解析，开启正则降级。")
                     
-            # 2. 防御性极强的降级正则策略 (多冲突排查)
+            # 2. 防御性极强的降级正则策略
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
-                extracted_numbers = {int(m.group(1)) for m in fallback_matches}
+                # 🚀 修复大模型思维链(CoT)冲突：永远以最后一次出现的有效数字为最终结论 🚀
+                # 抛弃之前过于保守的去重判定，包容模型“如你所说格式是 0，所以我选 2”的啰嗦输出
+                index = int(fallback_matches[-1].group(1))
                 
-                if len(extracted_numbers) > 1:
-                    raise ValueError(f"大模型输出了多个冲突的序号: {extracted_numbers}，拦截并打回重试。")
-                    
-                index = extracted_numbers.pop()
                 if index == 0: return -1
                 if 1 <= index <= total_count: return index - 1
                 raise ValueError(f"降级提取的序号 {index} 越界")
