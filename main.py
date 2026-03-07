@@ -15,9 +15,9 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 95
-MAX_BATCH_SIZE = 36  # 防御性安全上限，防止恶意配置引发 OOM
+MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.0.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.1.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -47,8 +47,6 @@ class SouTuShenQiPlugin(Star):
         return getattr(self.context, 'llm', None)
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        # 安全断言：限制单次最大处理数量
-        batch_size = min(batch_size, MAX_BATCH_SIZE)
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
@@ -60,7 +58,6 @@ class SouTuShenQiPlugin(Star):
             bing_urls = await fetch_bing_image_urls(keyword, batch_size)
             bing_items = await download_image_batch(bing_urls)
             
-            # 🚀 物理级去重：URL 去重 + 字节级 MD5 去重，杜绝相同图片的烂数据 🚀
             seen_urls = {u for u, _ in items}
             seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
             
@@ -101,7 +98,6 @@ class SouTuShenQiPlugin(Star):
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
                 if img.format not in ['JPEG', 'PNG']:
-                    # 🚀 完美的透明图层复合逻辑 🚀
                     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
                         try:
                             img = img.convert('RGBA')
@@ -134,11 +130,12 @@ class SouTuShenQiPlugin(Star):
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
-        batch_size = self.config.get("batch_size", 16)
+        # 统一收敛上限保护逻辑
+        batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
         
-        items = await self._ensure_minimum_images(keyword, min(batch_size, MAX_BATCH_SIZE))
+        items = await self._ensure_minimum_images(keyword, batch_size)
         if not items:
             return None, "所有的图片渠道均触发强力防盗链或失效，无一可用。"
 
