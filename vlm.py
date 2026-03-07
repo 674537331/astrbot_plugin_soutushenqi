@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
-import base64
 import json
 import re
+import os
+import tempfile
 import textwrap
 import asyncio
 import random
+import uuid
 from typing import List
 from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> List[str]:
-    """字符级堆栈解析器，增加换行状态复位防御文本污染"""
     results = []
     depth = 0
     start = -1
@@ -18,7 +19,6 @@ def _extract_json_objects(text: str) -> List[str]:
     escape_next = False
 
     for i, char in enumerate(text):
-        # 换行符重置状态，防止孤立引号导致解析失败
         if char == '\n':
             in_string = False
             escape_next = False
@@ -36,8 +36,7 @@ def _extract_json_objects(text: str) -> List[str]:
 
         if not in_string:
             if char == '{':
-                if depth == 0:
-                    start = i
+                if depth == 0: start = i
                 depth += 1
             elif char == '}':
                 if depth > 0:
@@ -48,17 +47,22 @@ def _extract_json_objects(text: str) -> List[str]:
     return results
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
-    if total_count <= 0:
-        return -1
+    if total_count <= 0: return -1
 
-    loop = asyncio.get_running_loop()
-    base64_str = await loop.run_in_executor(None, lambda: base64.b64encode(image_bytes).decode('utf-8'))
-    image_url = f"base64://{base64_str}"
+    # 🚀 修复并发覆盖 Bug：使用 uuid 生成唯一文件名，确保多用户并发安全
+    unique_filename = f"vlm_soutu_collage_{uuid.uuid4().hex}.jpg"
+    temp_path = os.path.join(tempfile.gettempdir(), unique_filename)
     
+    try:
+        with open(temp_path, "wb") as f: f.write(image_bytes)
+    except Exception as e:
+        logger.error(f"写入临时拼图失败: {e}")
+        return 0
+
     safe_desc = description[:300].replace('```', '')
 
     prompt = textwrap.dedent(f"""
-        这是一张包含了 {total_count} 张图片的拼图网格，每张图片左上角都有一个数字编号。
+        这是一张包含了 {total_count} 张图片的拼图网格，每张图片左上角都有一个黑底白字的数字编号。
         请仔细观察，并根据视觉需求描述：“{safe_desc}”，选出最符合要求的一张图片。
         
         【规则要求】
@@ -76,53 +80,56 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     retries = 3
     MAX_BACKOFF_TIME = 16.0 
     
-    for attempt in range(retries):
+    try:
+        for attempt in range(retries):
+            try:
+                response = await vlm_provider.text_chat(prompt=prompt, image_urls=[temp_path])
+                
+                if getattr(response, 'result_chain', None) is None:
+                    raise ValueError("提供方API返回数据结构无效，未包含消息链。")
+                    
+                result_text = response.result_chain.get_plain_text().strip()
+                json_blocks = _extract_json_objects(result_text)
+                parsed_index = None
+                
+                for block in reversed(json_blocks): 
+                    try:
+                        data = json.loads(block)
+                        if "best_index" in data:
+                            parsed_index = int(data["best_index"])
+                            break 
+                    except json.JSONDecodeError:
+                        continue
+                        
+                if parsed_index is not None:
+                    if parsed_index == 0: return -1 
+                    if 1 <= parsed_index <= total_count: return parsed_index - 1
+                    raise ValueError(f"序列化提取的索引值 {parsed_index} 不在合法区间 [0, {total_count}] 内。")
+                    
+                fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
+                if fallback_matches:
+                    index = int(fallback_matches[-1].group(1))
+                    if index == 0: return -1
+                    if 1 <= index <= total_count: return index - 1
+                    raise ValueError(f"正则表达式回退提取的索引值 {index} 不在合法区间 [0, {total_count}] 内。")
+                else:
+                    raise ValueError("输出响应未包含约定的特征键结构。")
+                        
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                err_msg = str(e).lower()
+                if any(k in err_msg for k in ["api key", "unauthorized", "blocked", "safety", "quota"]):
+                    logger.error(f"遭遇服务方拒绝服务响应，终止重试: {e}")
+                    break
+                logger.warning(f"VLM评估执行异常 (第 {attempt + 1}/{retries} 次): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(min(2 ** attempt, MAX_BACKOFF_TIME) + random.uniform(0, 1))
+    finally:
+        # 无论成功还是抛出异常，finally 都能确保对应的专属临时文件被清理，不留垃圾
         try:
-            response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
-            
-            if getattr(response, 'result_chain', None) is None:
-                raise ValueError("提供方API返回数据结构无效，未包含消息链。")
-                
-            result_text = response.result_chain.get_plain_text().strip()
-            json_blocks = _extract_json_objects(result_text)
-            parsed_index = None
-            
-            for block in reversed(json_blocks): 
-                try:
-                    data = json.loads(block)
-                    if "best_index" in data:
-                        parsed_index = int(data["best_index"])
-                        break 
-                except json.JSONDecodeError:
-                    continue
+            if os.path.exists(temp_path): os.remove(temp_path)
+        except: pass
                     
-            if parsed_index is not None:
-                if parsed_index == 0: return -1 
-                if 1 <= parsed_index <= total_count: return parsed_index - 1
-                raise ValueError(f"序列化提取的索引值 {parsed_index} 不在合法区间 [0, {total_count}] 内。")
-                
-            fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
-            if fallback_matches:
-                index = int(fallback_matches[-1].group(1))
-                if index == 0: return -1
-                if 1 <= index <= total_count: return index - 1
-                raise ValueError(f"正则表达式回退提取的索引值 {index} 不在合法区间 [0, {total_count}] 内。")
-            else:
-                raise ValueError("输出响应未包含约定的特征键结构。")
-                    
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            err_msg = str(e).lower()
-            if any(k in err_msg for k in ["api key", "unauthorized", "blocked", "safety", "quota"]):
-                logger.error(f"遭遇服务方拒绝服务响应 (Safety/Quota/Auth)，终止重试过程: {e}")
-                break
-                
-            logger.warning(f"VLM评估执行异常 (执行次数 {attempt + 1}/{retries}): {e}")
-            if attempt < retries - 1:
-                base_sleep = min(2 ** attempt, MAX_BACKOFF_TIME)
-                jitter = random.uniform(0, 1)
-                await asyncio.sleep(base_sleep + jitter)
-                
     logger.error("超出最大重试限制，状态降级返回基准索引(0)。")
     return 0
