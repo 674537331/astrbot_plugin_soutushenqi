@@ -19,23 +19,10 @@ def _extract_json_objects(text: str) -> List[str]:
     escape_next = False
 
     for i, char in enumerate(text):
-        if char == '\n':
-            in_string = False
-            escape_next = False
-            
-        if depth > 0 and char == '\\':
-            escape_next = True
-            continue
-        if depth > 0 and escape_next:
-            escape_next = False
-            continue
-
-        if depth > 0 and char == '"':
-            in_string = not in_string
-            continue
-
         if not in_string:
-            if char == '{':
+            if char == '"':
+                in_string = True
+            elif char == '{':
                 if depth == 0: start = i
                 depth += 1
             elif char == '}':
@@ -44,12 +31,19 @@ def _extract_json_objects(text: str) -> List[str]:
                     if depth == 0 and start != -1:
                         results.append(text[start:i+1])
                         start = -1
+        else:
+            if escape_next:
+                escape_next = False
+            elif char == '\\':
+                escape_next = True
+            elif char == '"':
+                in_string = False
+                
     return results
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
     if total_count <= 0: return -1
 
-    # 🚀 修复并发覆盖 Bug：使用 uuid 生成唯一文件名，确保多用户并发安全
     unique_filename = f"vlm_soutu_collage_{uuid.uuid4().hex}.jpg"
     temp_path = os.path.join(tempfile.gettempdir(), unique_filename)
     
@@ -126,10 +120,10 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 if attempt < retries - 1:
                     await asyncio.sleep(min(2 ** attempt, MAX_BACKOFF_TIME) + random.uniform(0, 1))
     finally:
-        # 无论成功还是抛出异常，finally 都能确保对应的专属临时文件被清理，不留垃圾
         try:
             if os.path.exists(temp_path): os.remove(temp_path)
-        except: pass
+        except Exception as cleanup_err:
+            logger.debug(f"清理临时文件失败 (可忽略): {cleanup_err}")
                     
     logger.error("超出最大重试限制，状态降级返回基准索引(0)。")
     return 0
