@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 import socket
 import ipaddress
+from urllib.parse import urlparse
 from typing import Optional
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from astrbot.api import logger
@@ -16,7 +17,8 @@ _composer_session = None
 _global_dl_semaphore = None
 _composer_lock = None
 
-def get_composer_lock() -> asyncio.Lock:
+# 🚀 修复隐患：强制在协程环境内获取事件循环并实例化 Lock 🚀
+async def get_composer_lock() -> asyncio.Lock:
     global _composer_lock
     if _composer_lock is None:
         _composer_lock = asyncio.Lock()
@@ -32,26 +34,42 @@ class SafeResolver(aiohttp.DefaultResolver):
             ip_str = info['host']
             try:
                 ip = ipaddress.ip_address(ip_str)
-                # 🚀 补全防穿透策略：全盘封锁保留网段、多播、未指定地址等一切内网变种 🚀
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or 
                     ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
-                    logger.error(f"SSRF 致命拦截：恶意域名 {host} 试图解析内部/保留 IP {ip_str}！")
+                    logger.error(f"SSRF 拦截：恶意域名 {host} 解析到危险 IP {ip_str}！")
                     raise SSRFInterceptError(f"SSRF 拦截：域名解析到内部/保留地址")
             except ValueError as e:
-                if "SSRF" in str(e):
-                    raise
+                if "SSRF" in str(e): raise
         return resolved
+
+def is_safe_url_host(url: str) -> bool:
+    """🚀 堵死漏洞：拦截直接以纯 IP 形式绕过 DNS Resolver 的 SSRF 攻击 🚀"""
+    try:
+        host = urlparse(url).hostname
+        if not host: return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or 
+                ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
+                return False
+        except ValueError:
+            pass # 是域名，交由下游 SafeResolver 审查真实解析 IP
+        return True
+    except Exception:
+        return False
 
 async def get_dl_semaphore() -> asyncio.Semaphore:
     global _global_dl_semaphore
-    async with get_composer_lock():
+    lock = await get_composer_lock()
+    async with lock:
         if _global_dl_semaphore is None:
             _global_dl_semaphore = asyncio.Semaphore(10)
     return _global_dl_semaphore
 
 async def get_composer_session() -> aiohttp.ClientSession:
     global _composer_session
-    async with get_composer_lock():
+    lock = await get_composer_lock()
+    async with lock:
         if _composer_session is None or _composer_session.closed:
             connector = aiohttp.TCPConnector(resolver=SafeResolver())
             _composer_session = aiohttp.ClientSession(connector=connector)
@@ -59,13 +77,18 @@ async def get_composer_session() -> aiohttp.ClientSession:
 
 async def close_composer_session():
     global _composer_session, _global_dl_semaphore
-    async with get_composer_lock():
+    lock = await get_composer_lock()
+    async with lock:
         if _composer_session and not _composer_session.closed:
             await _composer_session.close()
             _composer_session = None
         _global_dl_semaphore = None
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
+    if not is_safe_url_host(url):
+        logger.warning(f"安全防御：拦截非法直接 IP 请求: {url}")
+        return None
+
     async with semaphore:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
