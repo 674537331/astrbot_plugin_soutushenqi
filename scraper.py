@@ -20,7 +20,6 @@ USER_AGENTS = [
 ]
 
 def is_valid_image_url(u: str) -> bool:
-    """验证URL有效性，过滤静态UI资源及已知黑名单域名"""
     low_u = u.lower()
     if not low_u.startswith("http"): return False
     
@@ -51,7 +50,6 @@ def _extract_urls_from_html_sync(html_content: str, target_count: int) -> List[s
     return valid_urls
 
 class ScraperManager:
-    """浏览器抓取与搜索引擎分析管理器，隔离并发与生命周期状态"""
     def __init__(self):
         self._playwright_mgr = None
         self._browser: Browser = None
@@ -79,7 +77,7 @@ class ScraperManager:
                     logger.error(f"Playwright 实例初始化异常: {e}")
                     if self._playwright_mgr:
                         try: await self._playwright_mgr.stop()
-                        except: pass
+                        except Exception: pass
                         self._playwright_mgr = None
                     self._browser = None
                     raise e
@@ -97,12 +95,12 @@ class ScraperManager:
         async with lock:
             if self._browser:
                 try: await asyncio.wait_for(self._browser.close(), timeout=5.0)
-                except: pass
+                except Exception: pass
                 finally: self._browser = None
                     
             if self._playwright_mgr:
                 try: await asyncio.wait_for(self._playwright_mgr.stop(), timeout=5.0)
-                except: pass
+                except Exception: pass
                 finally: self._playwright_mgr = None
                 
             if self._session and not self._session.closed:
@@ -129,7 +127,9 @@ class ScraperManager:
             params = {"q": keyword, "first": first}
             
             try:
-                async with session.get(search_url, headers=headers, params=params, timeout=15) as resp:
+                # 遵从审查意见：使用 ClientTimeout(total=15) 替换整型隐式传参
+                req_timeout = aiohttp.ClientTimeout(total=15)
+                async with session.get(search_url, headers=headers, params=params, timeout=req_timeout) as resp:
                     if resp.status != 200:
                         break
                         
@@ -157,13 +157,11 @@ class ScraperManager:
                     if len(image_urls) < target_count:
                         await asyncio.sleep(random.uniform(0.5, 1.5))
                         
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error(f"网络请求异常: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError):
                 break
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.error(f"处理数据包发生异常: {e}", exc_info=True)
+            except Exception:
                 break
 
         return image_urls[:target_count]
@@ -213,9 +211,9 @@ class ScraperManager:
         finally:
             if page:
                 try: await asyncio.wait_for(page.close(), timeout=2.0)
-                except: pass
+                except Exception: pass
             if context:
                 try: await asyncio.wait_for(context.close(), timeout=2.0)
-                except: pass
+                except Exception: pass
                 
         return valid_urls[:target_count], error_msg
