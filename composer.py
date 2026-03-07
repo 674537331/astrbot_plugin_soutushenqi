@@ -8,7 +8,7 @@ import ipaddress
 from urllib.parse import urlparse
 from typing import Optional, List, Tuple
 
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from astrbot.api import logger
 
 TILE_SIZE = 300
@@ -26,7 +26,7 @@ class SafeResolver(aiohttp.DefaultResolver):
                 ip = ipaddress.ip_address(ip_str)
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or 
                     ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
-                    raise SSRFInterceptError("SSRF拦截机制生效：检测到受限网络地址。")
+                    raise SSRFInterceptError("检测到受限网络地址。")
             except ValueError as e:
                 if "SSRF" in str(e): raise
         return resolved
@@ -60,17 +60,12 @@ def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes
     for url, img_bytes in items:
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
-                # 过滤低分辨率图像（单边小于 500 像素即视为缩略图抛弃）
-                if img.width < 500 or img.height < 500:
-                    logger.debug(f"剔除低分辨率图像 ({img.width}x{img.height}): {url}")
-                    continue
-                
-                # 等比例无损裁剪，防止拉伸
+                # 分辨率过滤已在上游完成，此处仅处理等比例居中裁剪
                 converted_img = ImageOps.fit(img.convert("RGB"), (TILE_SIZE, TILE_SIZE), method=Image.Resampling.LANCZOS)
                 successful_images.append(converted_img)
                 valid_items.append((url, img_bytes))
         except Exception as e:
-            logger.debug(f"过滤损坏或无法识别格式的图像数据: {e}")
+            logger.debug(f"排除无法处理的图像流: {e}")
             continue
 
     if not successful_images: return None, []
@@ -149,7 +144,6 @@ class ComposerManager:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
             }
-            # 快速失败机制：对于低响应速率的图床设定严格限制
             req_timeout = aiohttp.ClientTimeout(connect=5, sock_read=8)
             try:
                 async with session.get(url, headers=headers, timeout=req_timeout) as resp:
@@ -162,12 +156,10 @@ class ComposerManager:
                     async for chunk in resp.content.iter_chunked(1024 * 1024):
                         downloaded_size += len(chunk)
                         if downloaded_size > MAX_IMAGE_SIZE:
-                            # 遵从审查意见：依赖 async with 自动关闭连接，移除手动 resp.close()
                             return None
                         chunks.append(chunk)
                     return b"".join(chunks)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.debug(f"连接或传输超时 ({url}): {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError):
                 return None
             except asyncio.CancelledError:
                 raise
