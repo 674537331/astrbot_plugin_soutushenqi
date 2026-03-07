@@ -9,13 +9,11 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
-    # 🚀 前置极值防御 🚀
     if total_count <= 0:
         return -1
 
     base64_str = base64.b64encode(image_bytes).decode('utf-8')
     image_url = f"base64://{base64_str}"
-
     safe_desc = description[:300].replace('```', '')
 
     prompt = textwrap.dedent(f"""
@@ -27,7 +25,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         2. 如果有符合的，请返回对应的数字编号。
         
         你必须且只能返回一个纯净的 JSON 对象，包含 "best_index" 键。
-        【警告】绝对不允许输出任何多余的解释文本！绝对不允许使用 Markdown 代码块（如 ```json）包裹！
+        【警告】绝对不允许输出任何多余的解释文本！
         
         示例响应：
         {{
@@ -45,20 +43,23 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 1. 第一优先级：标准 JSON 解析
+            # 🚀 第一优先级：使用非贪婪正则直接抽取 JSON 块，无视多余的前言后语 🚀
             try:
-                clean_text = re.sub(r'^```json|```$', '', result_text, flags=re.MULTILINE).strip()
-                data = json.loads(clean_text)
-                index = int(data.get("best_index", 1))
-                
-                if index == 0: return -1 
-                if 1 <= index <= total_count: return index - 1
-                raise ValueError(f"JSON 提取的序号 {index} 越界")
-                
-            except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败: {e}")
+                json_match = re.search(r'\{.*?\}', result_text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    index = int(data.get("best_index", 1))
                     
-            # 2. 🚀 剔除“饥不择食”的盲猜提取，启用严格格式正则 🚀
+                    if index == 0: return -1 
+                    if 1 <= index <= total_count: return index - 1
+                    raise ValueError(f"JSON 提取的序号 {index} 越界")
+                else:
+                    raise json.JSONDecodeError("未匹配到大括号包裹的JSON块", result_text, 0)
+                    
+            except json.JSONDecodeError as e:
+                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
+                    
+            # 2. 防御性极强的降级正则策略
             fallback_match = re.search(r'(?:"best_index"\s*:\s*)(\d+)', result_text)
             if fallback_match:
                 index = int(fallback_match.group(1))
@@ -66,7 +67,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 if 1 <= index <= total_count: return index - 1
                 raise ValueError(f"严格降级提取的序号 {index} 越界")
             else:
-                # 严厉的反馈：如果不符合上述两项格式，直接判定失败并打回重试！
                 raise ValueError("未在输出中找到合法的 'best_index: [数字]' 结构。")
                     
         except asyncio.CancelledError:
