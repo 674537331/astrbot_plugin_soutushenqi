@@ -13,55 +13,67 @@ SCROLL_WAIT = 1000
 _playwright_mgr = None
 _browser: Browser = None
 _scraper_session = None
+_scraper_lock = None
+
+def get_scraper_lock() -> asyncio.Lock:
+    """🚀 同步懒加载锁，百分百防并发竞态 🚀"""
+    global _scraper_lock
+    if _scraper_lock is None:
+        _scraper_lock = asyncio.Lock()
+    return _scraper_lock
 
 async def get_browser() -> Browser:
     global _playwright_mgr, _browser
-    if _browser is None or not _browser.is_connected():
-        try:
-            logger.info("初始化全局 Playwright 浏览器实例...")
-            _playwright_mgr = await async_playwright().start()
-            _browser = await _playwright_mgr.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
-            )
-        except Exception as e:
-            logger.error(f"Playwright 浏览器初始化失败: {e}")
-            if _playwright_mgr:
-                await _playwright_mgr.stop()
-                _playwright_mgr = None
-            _browser = None
-            raise e
+    async with get_scraper_lock():
+        if _browser is None or not _browser.is_connected():
+            try:
+                logger.info("初始化全局 Playwright 浏览器实例...")
+                _playwright_mgr = await async_playwright().start()
+                _browser = await _playwright_mgr.chromium.launch(
+                    headless=True,
+                    args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+                )
+            except Exception as e:
+                logger.error(f"Playwright 浏览器初始化失败: {e}")
+                if _playwright_mgr:
+                    await _playwright_mgr.stop()
+                    _playwright_mgr = None
+                _browser = None
+                raise e
     return _browser
 
 async def get_scraper_session() -> aiohttp.ClientSession:
     global _scraper_session
-    if _scraper_session is None or _scraper_session.closed:
-        _scraper_session = aiohttp.ClientSession()
+    async with get_scraper_lock():
+        if _scraper_session is None or _scraper_session.closed:
+            _scraper_session = aiohttp.ClientSession()
     return _scraper_session
 
 async def close_browser():
     global _playwright_mgr, _browser
-    if _browser:
-        try:
-            await asyncio.wait_for(_browser.close(), timeout=5.0)
-        except Exception as e:
-            logger.error(f"强制关闭 Browser 实例时发生异常: {e}")
-        finally:
-            _browser = None
-            
-    if _playwright_mgr:
-        try:
-            await asyncio.wait_for(_playwright_mgr.stop(), timeout=5.0)
-        except Exception as e:
-            logger.error(f"强制关闭 Playwright Mgr 时发生异常: {e}")
-        finally:
-            _playwright_mgr = None
+    async with get_scraper_lock():
+        if _browser:
+            try:
+                await asyncio.wait_for(_browser.close(), timeout=5.0)
+            except Exception as e:
+                logger.error(f"强制关闭 Browser 实例时发生异常: {e}")
+            finally:
+                _browser = None
+                
+        if _playwright_mgr:
+            try:
+                await asyncio.wait_for(_playwright_mgr.stop(), timeout=5.0)
+            except Exception as e:
+                logger.error(f"强制关闭 Playwright Mgr 时发生异常: {e}")
+            finally:
+                _playwright_mgr = None
 
 async def close_scraper_session():
     global _scraper_session
-    if _scraper_session and not _scraper_session.closed:
-        await _scraper_session.close()
-        _scraper_session = None
+    async with get_scraper_lock():
+        if _scraper_session and not _scraper_session.closed:
+            await _scraper_session.close()
+            _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
     if not u.startswith("http") or 'soutushenqi.com' in u: return False
@@ -69,13 +81,28 @@ def is_valid_image_url(u: str) -> bool:
     low_u = u.lower()
     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
     
-    # 🚀 修复带有 hash 锚点 (#) 或 query (?) 的合法图片被误杀 🚀
     parsed = urllib.parse.urlparse(low_u)
     path = parsed.path
     if not any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
         return False
         
     return True
+
+def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
+    """🚀 在独立线程中处理 Bing 正则，杜绝阻塞主循环 🚀"""
+    matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
+    found = []
+    for img_url in matches:
+        if img_url and img_url.startswith("http"):
+            low_u = img_url.lower()
+            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
+                continue
+            if img_url not in seen_urls:
+                found.append(img_url)
+                seen_urls.add(img_url)
+                if len(found) >= target_count:
+                    break
+    return found
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
@@ -104,6 +131,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     consecutive_errors = 0 
     
     session = await get_scraper_session()
+    loop = asyncio.get_running_loop()
     
     while len(valid_urls) < target_count and pages_fetched < max_pages:
         pages_fetched += 1
@@ -122,22 +150,14 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
-                matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
-                new_found = 0
                 
-                for img_url in matches:
-                    if img_url and img_url.startswith("http"):
-                        low_u = img_url.lower()
-                        if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
-                            continue
-                        if img_url not in seen_urls:
-                            valid_urls.append(img_url)
-                            seen_urls.add(img_url)
-                            new_found += 1
-                            if len(valid_urls) >= target_count:
-                                return valid_urls
-                if new_found == 0:
+                # 在线程池中执行繁重的正则解析
+                new_urls = await loop.run_in_executor(None, _extract_bing_urls_sync, html, target_count - len(valid_urls), seen_urls)
+                valid_urls.extend(new_urls)
+                
+                if not new_urls:
                     break
+                    
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             consecutive_errors += 1
             if consecutive_errors >= 3:
@@ -195,14 +215,15 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     except Exception as e:
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
+        # 🚀 修复资源残留：加入 wait_for 防止异常卡死 🚀
         if page:
             try:
-                await page.close()
+                await asyncio.wait_for(page.close(), timeout=2.0)
             except Exception:
                 pass
         if context:
             try:
-                await context.close()
+                await asyncio.wait_for(context.close(), timeout=2.0)
             except Exception:
                 pass
             
