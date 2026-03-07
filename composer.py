@@ -6,28 +6,19 @@ import aiohttp
 import socket
 import ipaddress
 from urllib.parse import urlparse
-from typing import Optional
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from typing import Optional, List, Tuple
+
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError, ImageOps
 from astrbot.api import logger
 
 TILE_SIZE = 300
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  
 
-_composer_session = None
-_global_dl_semaphore = None
-_composer_lock = None
-
-# 🚀 修复隐患：强制在协程环境内获取事件循环并实例化 Lock 🚀
-async def get_composer_lock() -> asyncio.Lock:
-    global _composer_lock
-    if _composer_lock is None:
-        _composer_lock = asyncio.Lock()
-    return _composer_lock
-
 class SSRFInterceptError(Exception):
     pass
 
 class SafeResolver(aiohttp.DefaultResolver):
+    """解析器子类：拦截内部或受限IP的解析，防御SSRF攻击"""
     async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
         resolved = await super().resolve(host, port, family)
         for info in resolved:
@@ -36,14 +27,14 @@ class SafeResolver(aiohttp.DefaultResolver):
                 ip = ipaddress.ip_address(ip_str)
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or 
                     ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
-                    logger.error(f"SSRF 拦截：恶意域名 {host} 解析到危险 IP {ip_str}！")
-                    raise SSRFInterceptError(f"SSRF 拦截：域名解析到内部/保留地址")
+                    logger.error(f"安全策略拦截：域名 {host} 尝试解析至受限网络地址 {ip_str}。")
+                    raise SSRFInterceptError("SSRF拦截机制生效：检测到受限网络地址。")
             except ValueError as e:
                 if "SSRF" in str(e): raise
         return resolved
 
 def is_safe_url_host(url: str) -> bool:
-    """🚀 堵死漏洞：拦截直接以纯 IP 形式绕过 DNS Resolver 的 SSRF 攻击 🚀"""
+    """过滤直接使用 IP 绕过解析器的非法请求格式"""
     try:
         host = urlparse(url).hostname
         if not host: return False
@@ -53,82 +44,10 @@ def is_safe_url_host(url: str) -> bool:
                 ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
                 return False
         except ValueError:
-            pass # 是域名，交由下游 SafeResolver 审查真实解析 IP
+            pass 
         return True
     except Exception:
         return False
-
-async def get_dl_semaphore() -> asyncio.Semaphore:
-    global _global_dl_semaphore
-    lock = await get_composer_lock()
-    async with lock:
-        if _global_dl_semaphore is None:
-            _global_dl_semaphore = asyncio.Semaphore(10)
-    return _global_dl_semaphore
-
-async def get_composer_session() -> aiohttp.ClientSession:
-    global _composer_session
-    lock = await get_composer_lock()
-    async with lock:
-        if _composer_session is None or _composer_session.closed:
-            connector = aiohttp.TCPConnector(resolver=SafeResolver())
-            _composer_session = aiohttp.ClientSession(connector=connector)
-    return _composer_session
-
-async def close_composer_session():
-    global _composer_session, _global_dl_semaphore
-    lock = await get_composer_lock()
-    async with lock:
-        if _composer_session and not _composer_session.closed:
-            await _composer_session.close()
-            _composer_session = None
-        _global_dl_semaphore = None
-
-async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
-    if not is_safe_url_host(url):
-        logger.warning(f"安全防御：拦截非法直接 IP 请求: {url}")
-        return None
-
-    async with semaphore:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
-        }
-        # 🚀 修复：去除会引起并发任务全体超时崩盘的极短 total 限制，增加连接和读取超时控制 🚀
-        req_timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_read=15)
-        try:
-            async with session.get(url, headers=headers, timeout=req_timeout) as resp:
-                if resp.status != 200: return None
-                content_type = resp.headers.get('Content-Type', '').lower()
-                if 'text/html' in content_type: return None
-                
-                chunks = []
-                downloaded_size = 0
-                async for chunk in resp.content.iter_chunked(1024 * 1024):
-                    downloaded_size += len(chunk)
-                    if downloaded_size > MAX_IMAGE_SIZE:
-                        logger.warning(f"触发 OOM 防御，截断下载: {url}")
-                        resp.close()
-                        return None
-                    chunks.append(chunk)
-                return b"".join(chunks)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.debug(f"网络连接或超时 ({url}): {e}")
-            return None
-        except asyncio.CancelledError:
-            raise
-        except SSRFInterceptError:
-            return None
-        except Exception as e:
-            logger.warning(f"未预料下载异常 ({url}): {e}")
-            return None
-
-async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    semaphore = await get_dl_semaphore()
-    session = await get_composer_session()
-    tasks = [download_image(session, semaphore, url) for url in urls]
-    results = await asyncio.gather(*tasks)
-    return [(u, r) for u, r in zip(urls, results) if r]
 
 def _get_large_font():
     try:
@@ -139,17 +58,18 @@ def _get_large_font():
         except IOError:
             return ImageFont.load_default()
 
-def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
+def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
+    """生成缩略图矩阵。采用无损等比例裁剪(ImageOps.fit)避免图像拉伸形变。"""
     successful_images, valid_items = [], []
     for url, img_bytes in items:
         try:
-            # 🚀 修复：增加 with 上下文管理器，防止大量的内存和文件句柄泄露 🚀
             with Image.open(io.BytesIO(img_bytes)) as img:
-                converted_img = img.convert("RGB").resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+                # 核心优化：等比例居中裁剪，不破坏原图纵横比
+                converted_img = ImageOps.fit(img.convert("RGB"), (TILE_SIZE, TILE_SIZE), method=Image.Resampling.LANCZOS)
                 successful_images.append(converted_img)
                 valid_items.append((url, img_bytes))
-        except Exception as e: # 捕获全部异常，任何解析失败的数据均直接抛弃
-            logger.debug(f"丢弃无法识别或损坏的图像数据 ({url}): {e}")
+        except Exception as e:
+            logger.debug(f"过滤损坏或无法识别格式的图像数据 ({url}): {e}")
             continue
 
     if not successful_images: return None, []
@@ -182,6 +102,86 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         collage.save(buffer, format="JPEG", quality=85)
         return buffer.getvalue(), valid_items
 
-async def create_collage_from_items(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes], list[tuple[str, bytes]]]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _create_collage_sync, items)
+class ComposerManager:
+    """图像合成与下载管理器，隔离网络会话和并发信号量状态"""
+    def __init__(self):
+        self._session = None
+        self._semaphore = None
+        self._lock = None
+
+    async def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def _get_semaphore(self) -> asyncio.Semaphore:
+        lock = await self._get_lock()
+        async with lock:
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(10)
+        return self._semaphore
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        lock = await self._get_lock()
+        async with lock:
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(resolver=SafeResolver())
+                self._session = aiohttp.ClientSession(connector=connector)
+        return self._session
+
+    async def close_all(self):
+        lock = await self._get_lock()
+        async with lock:
+            if self._session and not self._session.closed:
+                await self._session.close()
+                self._session = None
+            self._semaphore = None
+
+    async def _download_image(self, url: str) -> Optional[bytes]:
+        if not is_safe_url_host(url):
+            return None
+
+        semaphore = await self._get_semaphore()
+        session = await self._get_session()
+
+        async with semaphore:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
+            }
+            req_timeout = aiohttp.ClientTimeout(connect=10, sock_read=15)
+            try:
+                async with session.get(url, headers=headers, timeout=req_timeout) as resp:
+                    if resp.status != 200: return None
+                    content_type = resp.headers.get('Content-Type', '').lower()
+                    if 'text/html' in content_type: return None
+                    
+                    chunks = []
+                    downloaded_size = 0
+                    async for chunk in resp.content.iter_chunked(1024 * 1024):
+                        downloaded_size += len(chunk)
+                        if downloaded_size > MAX_IMAGE_SIZE:
+                            logger.warning(f"数据量超过设定阈值 ({MAX_IMAGE_SIZE} bytes)，终止流读取: {url}")
+                            resp.close()
+                            return None
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.debug(f"建立连接或传输超时 ({url}): {e}")
+                return None
+            except asyncio.CancelledError:
+                raise
+            except SSRFInterceptError:
+                return None
+            except Exception as e:
+                logger.warning(f"下载过程引发未处理异常 ({url}): {e}")
+                return None
+
+    async def download_image_batch(self, urls: List[str]) -> List[Tuple[str, bytes]]:
+        tasks = [self._download_image(url) for url in urls]
+        results = await asyncio.gather(*tasks)
+        return [(u, r) for u, r in zip(urls, results) if r]
+
+    async def create_collage_from_items(self, items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _create_collage_sync, items)
