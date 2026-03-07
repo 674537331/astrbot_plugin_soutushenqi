@@ -51,7 +51,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         with open(temp_path, "wb") as f: f.write(image_bytes)
     except Exception as e:
         logger.error(f"写入临时拼图失败: {e}")
-        return 0
+        # 🌟 修复状态混淆：写入失败直接返回特异性异常码 -2
+        return -2
 
     safe_desc = description[:300].replace('```', '')
 
@@ -125,5 +126,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         except Exception as cleanup_err:
             logger.debug(f"清理临时文件失败 (可忽略): {cleanup_err}")
                     
-    logger.error("超出最大重试限制，状态降级返回基准索引(0)。")
-    return 0
+    # 🌟 修复状态混淆：异常耗尽返回 -2，彻底和 "选中第1张图(0)" 脱钩
+    logger.error("超出最大重试限制，状态降级返回异常错误码(-2)。")
+    return -2
