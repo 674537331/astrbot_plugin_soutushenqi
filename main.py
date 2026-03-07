@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
 import asyncio
-import hashlib
 from typing import Optional, List, Tuple, Callable
 
 from PIL import Image, UnidentifiedImageError
@@ -22,8 +21,7 @@ from .composer import ComposerManager
 from .vlm import select_best_image_index
 
 JPEG_QUALITY = 85
-TARGET_VLM_COUNT = 9  
-MIN_RESOLUTION = 500  # 设定的最小物理分辨率阈值
+MIN_RESOLUTION = 500 
 
 TOOL_INSTRUCTION = (
     "\n【搜图工具使用规范】\n"
@@ -33,12 +31,10 @@ TOOL_INSTRUCTION = (
     "4. 若用户请求描述简短（如“搜一张猫”），必须基于语境将其扩写为详细的视觉描述传入 `description` 参数，以提升检索和筛选精度。"
 )
 
-# 将数据类提升至模块级作用域，避免在类初始化中重复进行高昂的反射操作
 @dataclass
 class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
     name: str = "search_image_tool"
     description: str = "搜索网络上的高清图片、壁纸、照片并发送给用户。必需参数：keyword 和 description。"
-    # 依赖注入回调接口，避免全局变量污染
     plugin_callback: Optional[Callable] = Field(default=None, exclude=True) 
     parameters: dict = Field(
         default_factory=lambda: {
@@ -74,18 +70,17 @@ class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
             return await self.plugin_callback(event, keyword, description)
         return "工具调用失败：插件实例回调未绑定。"
 
-
-@register("astrbot_plugin_soutushenqi", "PluginDeveloper", "智能搜图与比对插件", "v7.3.0")
+@register("astrbot_plugin_soutushenqi", "PluginDeveloper", "智能搜图与比对插件", "v7.3.1")
 class SouTuShenQiPlugin(Star):
-    def __init__(self, context: Context, config: dict):
+    def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
-        self.config = config
+        self.config = config or {}
         
         self.scraper_mgr = ScraperManager()
         self.composer_mgr = ComposerManager()
         
         tool = SearchImageFunctionTool()
-        tool.plugin_callback = self._execute_tool # 绑定实例方法
+        tool.plugin_callback = self._execute_tool 
         
         try:
             self.context.add_llm_tools(tool)
@@ -102,26 +97,22 @@ class SouTuShenQiPlugin(Star):
         provider_id = self.config.get("vlm_provider_id", "")
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
-            if provider:
-                return provider
+            if provider: return provider
         
         umo = getattr(event, "unified_msg_origin", None)
         if umo:
             curr_id = await self.context.get_current_chat_provider_id(umo)
             if curr_id:
                 provider = self.context.get_provider_by_id(curr_id)
-                if provider:
-                    return provider
+                if provider: return provider
                 
         return getattr(self.context, 'llm', None)
 
     def _validate_and_hash_sync(self, img_bytes: bytes) -> Tuple[bool, str]:
-        """验证物理分辨率并计算感知哈希（前置过滤逻辑）"""
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
                 if img.width < MIN_RESOLUTION or img.height < MIN_RESOLUTION:
                     return False, ""
-                
                 img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
                 pixels = list(img.getdata())
                 avg = sum(pixels) / len(pixels)
@@ -131,48 +122,37 @@ class SouTuShenQiPlugin(Star):
             return False, ""
 
     async def _ensure_minimum_images(self, keyword: str) -> List[Tuple[str, bytes]]:
+        target_count = self.config.get("batch_size", 9)
         valid_items = []
-        seen_urls = set()
         seen_hashes = set()
         loop = asyncio.get_running_loop()
 
-        async def _process_urls(urls_to_try: List[str]):
-            nonlocal valid_items
-            urls_to_try = [u for u in urls_to_try if u not in seen_urls]
-            if not urls_to_try: return
-
-            seen_urls.update(urls_to_try)
-            downloaded = await self.composer_mgr.download_image_batch(urls_to_try)
-            
+        urls, _ = await self.scraper_mgr.fetch_image_urls(keyword, target_count * 4)
+        
+        if urls:
+            downloaded = await self.composer_mgr.download_image_batch(urls, target_count=target_count)
             for url, img_bytes in downloaded:
-                if len(valid_items) >= TARGET_VLM_COUNT:
-                    break
-                
-                # 执行异步包装的分辨率验证与哈希计算
+                if len(valid_items) >= target_count: break
                 is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes)
-                
                 if is_valid and b_hash not in seen_hashes:
                     valid_items.append((url, img_bytes))
                     seen_hashes.add(b_hash)
+                    
+        logger.info(f"主图源处理完毕，当前高清去重有效图片数: {len(valid_items)}")
 
-        urls, _ = await self.scraper_mgr.fetch_image_urls(keyword, 20)
-        await _process_urls(urls)
-        logger.info(f"主图源处理完毕，当前高清有效图片数: {len(valid_items)}")
-
-        if len(valid_items) < TARGET_VLM_COUNT:
-            bing_urls = await self.scraper_mgr.fetch_bing_image_urls(keyword, 30)
-            await _process_urls(bing_urls)
+        if len(valid_items) < target_count:
+            bing_urls = await self.scraper_mgr.fetch_bing_image_urls(keyword, 20)
+            if bing_urls:
+                bing_dl = await self.composer_mgr.download_image_batch(bing_urls, target_count=target_count - len(valid_items))
+                for url, img_bytes in bing_dl:
+                    if len(valid_items) >= target_count: break
+                    is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes)
+                    if is_valid and b_hash not in seen_hashes:
+                        valid_items.append((url, img_bytes))
+                        seen_hashes.add(b_hash)
             logger.info(f"Bing 补充处理完毕，当前高清有效图片数: {len(valid_items)}")
 
-        if len(valid_items) < 3:
-            simplified_keyword = " ".join(keyword.split()[:2])
-            if simplified_keyword and simplified_keyword != keyword:
-                logger.warning(f"有效图片不足，执行关键词降级: [{keyword}] -> [{simplified_keyword}]")
-                fallback_urls = await self.scraper_mgr.fetch_bing_image_urls(simplified_keyword, 20)
-                await _process_urls(fallback_urls)
-                logger.info(f"关键词降级处理完毕，最终高清有效图片数: {len(valid_items)}")
-
-        return valid_items[:TARGET_VLM_COUNT]
+        return valid_items[:target_count]
 
     async def _vlm_selection(self, event: AstrMessageEvent, items: List[Tuple[str, bytes]], eval_desc: str) -> Tuple[str, bytes, str]:
         collage_bytes, valid_items = await self.composer_mgr.create_collage_from_items(items)
@@ -212,10 +192,8 @@ class SouTuShenQiPlugin(Star):
                             return buf.getvalue()
                     return img_bytes
         except UnidentifiedImageError:
-            logger.warning("图片文件头损坏或格式不受支持。")
             return img_bytes
         except Exception as e:
-            logger.error(f"图片转码过程发生异常: {e}", exc_info=True)
             return img_bytes
 
     async def _format_image(self, img_bytes: bytes) -> bytes:
@@ -274,7 +252,6 @@ class SouTuShenQiPlugin(Star):
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.config.get("enable_explanation_image", True):
-            # 引入空指针防御机制
             req.system_prompt = req.system_prompt or ""
             if TOOL_INSTRUCTION not in req.system_prompt:
                 req.system_prompt += TOOL_INSTRUCTION
