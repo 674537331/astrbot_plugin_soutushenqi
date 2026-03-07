@@ -17,7 +17,7 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.3.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.4.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -46,8 +46,9 @@ class SouTuShenQiPlugin(Star):
                 
         return getattr(self.context, 'llm', None)
 
-    def _calculate_and_dedup_sync(self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
-        """🚀 将所有密集的哈希运算隔离在线程池中，彻底杜绝事件循环阻塞 🚀"""
+    def _calculate_and_dedup_sync(
+        self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]
+    ) -> list[tuple[str, bytes]]:
         seen_urls = {u for u, _ in items}
         seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
         
@@ -61,7 +62,6 @@ class SouTuShenQiPlugin(Star):
         return new_bing_items
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        batch_size = min(batch_size, MAX_BATCH_SIZE)
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
@@ -81,7 +81,9 @@ class SouTuShenQiPlugin(Star):
             
         return items
 
-    async def _vlm_selection(self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str) -> tuple[str, bytes, str]:
+    async def _vlm_selection(
+        self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str
+    ) -> tuple[str, bytes, str]:
         collage_bytes, valid_items = await create_collage_from_items(items)
         if not collage_bytes or not valid_items:
             return "", b"", "图片拼合处理失败，可用图片的数据均已损坏。"
@@ -136,7 +138,10 @@ class SouTuShenQiPlugin(Star):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
-    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
+    async def _process_image_search(
+        self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool
+    ) -> tuple[bytes | None, str]:
+        # 统一收敛安全校验
         batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
