@@ -12,7 +12,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from astrbot.api import logger
 
 TILE_SIZE = 300
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  
+MAX_IMAGE_SIZE = 15 * 1024 * 1024  
+
+# 全局字体缓存，避免高并发下的同步 I/O 损耗
+_FONT_CACHE = None
 
 class SSRFInterceptError(Exception):
     pass
@@ -47,25 +50,23 @@ def is_safe_url_host(url: str) -> bool:
         return False
 
 def _get_large_font():
-    try:
-        return ImageFont.truetype("arial.ttf", 36)
-    except IOError:
-        try:
-            return ImageFont.truetype("DejaVuSans.ttf", 36)
+    global _FONT_CACHE
+    if _FONT_CACHE is None:
+        try: _FONT_CACHE = ImageFont.truetype("arial.ttf", 36)
         except IOError:
-            return ImageFont.load_default()
+            try: _FONT_CACHE = ImageFont.truetype("DejaVuSans.ttf", 36)
+            except IOError: _FONT_CACHE = ImageFont.load_default()
+    return _FONT_CACHE
 
 def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
     successful_images, valid_items = [], []
     for url, img_bytes in items:
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
-                # 分辨率过滤已在上游完成，此处仅处理等比例居中裁剪
                 converted_img = ImageOps.fit(img.convert("RGB"), (TILE_SIZE, TILE_SIZE), method=Image.Resampling.LANCZOS)
                 successful_images.append(converted_img)
                 valid_items.append((url, img_bytes))
         except Exception as e:
-            logger.debug(f"排除无法处理的图像流: {e}")
             continue
 
     if not successful_images: return None, []
@@ -104,74 +105,89 @@ class ComposerManager:
         self._semaphore = None
         self._lock = None
 
-    async def _get_lock(self) -> asyncio.Lock:
+    def _ensure_primitives(self):
         if self._lock is None:
             self._lock = asyncio.Lock()
-        return self._lock
-
-    async def _get_semaphore(self) -> asyncio.Semaphore:
-        lock = await self._get_lock()
-        async with lock:
-            if self._semaphore is None:
-                self._semaphore = asyncio.Semaphore(10)
-        return self._semaphore
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(15)
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        lock = await self._get_lock()
-        async with lock:
+        self._ensure_primitives()
+        async with self._lock:
             if self._session is None or self._session.closed:
                 connector = aiohttp.TCPConnector(resolver=SafeResolver())
                 self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
     async def close_all(self):
-        lock = await self._get_lock()
-        async with lock:
+        self._ensure_primitives()
+        async with self._lock:
             if self._session and not self._session.closed:
                 await self._session.close()
                 self._session = None
             self._semaphore = None
 
-    async def _download_image(self, url: str) -> Optional[bytes]:
-        if not is_safe_url_host(url):
-            return None
+    async def _download_image(self, url: str) -> Tuple[str, Optional[bytes]]:
+        if not is_safe_url_host(url): return url, None
 
-        semaphore = await self._get_semaphore()
+        self._ensure_primitives()
         session = await self._get_session()
 
-        async with semaphore:
+        async with self._semaphore:
+            referer = "https://www.soutushenqi.com/" 
+            if any(x in url for x in ["huaban.com", "hb.aicdn.com", "hbimg"]): referer = "https://huaban.com/"
+            elif "duitang.com" in url: referer = "https://www.duitang.com/"
+            elif any(x in url for x in ["hdslb.com", "bilibili.com"]): referer = "https://www.bilibili.com/"  
+            elif "sinaimg.cn" in url: referer = ""  
+            elif "zhimg.com" in url: referer = "https://www.zhihu.com/"
+            elif "gamersky.com" in url: referer = "" 
+            elif "douyinpic.com" in url: referer = "https://www.douyin.com/"
+            elif "baidu.com" in url: referer = "https://image.baidu.com/"
+
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
             }
+            if referer: headers["Referer"] = referer
+
             req_timeout = aiohttp.ClientTimeout(connect=5, sock_read=8)
             try:
                 async with session.get(url, headers=headers, timeout=req_timeout) as resp:
-                    if resp.status != 200: return None
+                    if resp.status != 200: return url, None
                     content_type = resp.headers.get('Content-Type', '').lower()
-                    if 'text/html' in content_type: return None
+                    if 'text/html' in content_type: return url, None
                     
                     chunks = []
                     downloaded_size = 0
                     async for chunk in resp.content.iter_chunked(1024 * 1024):
                         downloaded_size += len(chunk)
-                        if downloaded_size > MAX_IMAGE_SIZE:
-                            return None
+                        if downloaded_size > MAX_IMAGE_SIZE: return url, None
                         chunks.append(chunk)
-                    return b"".join(chunks)
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                return None
-            except asyncio.CancelledError:
-                raise
-            except SSRFInterceptError:
-                return None
+                    return url, b"".join(chunks)
             except Exception:
-                return None
+                return url, None
 
-    async def download_image_batch(self, urls: List[str]) -> List[Tuple[str, bytes]]:
-        tasks = [self._download_image(url) for url in urls]
-        results = await asyncio.gather(*tasks)
-        return [(u, r) for u, r in zip(urls, results) if r]
+    async def download_image_batch(self, urls: List[str], target_count: int = 9) -> List[Tuple[str, bytes]]:
+        valid_items = []
+        pending_tasks = [asyncio.create_task(self._download_image(url)) for url in urls]
+        
+        for coro in asyncio.as_completed(pending_tasks):
+            if len(valid_items) >= target_count:
+                for t in pending_tasks:
+                    if not t.done(): t.cancel()
+                break 
+                
+            try:
+                url, res = await coro
+                if isinstance(res, bytes) and res:
+                    valid_items.append((url, res))
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue
+                
+        logger.info(f"Composer: 智能下载完毕，已凑齐 {len(valid_items)} 张图片。")
+        return valid_items
 
     async def create_collage_from_items(self, items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
         loop = asyncio.get_running_loop()
