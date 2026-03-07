@@ -14,10 +14,16 @@ MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 _composer_session = None
 _global_dl_semaphore = None
+_composer_lock = None
 
-# 🚀 定义明确的自定义异常，符合最佳实践 🚀
+def get_composer_lock() -> asyncio.Lock:
+    """🚀 同步获取锁，绝对的原子级安全，防竞态 🚀"""
+    global _composer_lock
+    if _composer_lock is None:
+        _composer_lock = asyncio.Lock()
+    return _composer_lock
+
 class SSRFInterceptError(Exception):
-    """用于防御 SSRF 攻击时抛出的安全中断异常"""
     pass
 
 class SafeResolver(aiohttp.DefaultResolver):
@@ -29,31 +35,34 @@ class SafeResolver(aiohttp.DefaultResolver):
                 ip = ipaddress.ip_address(ip_str)
                 if ip.is_private or ip.is_loopback or ip.is_link_local:
                     logger.error(f"SSRF 拦截：恶意域名 {host} 试图解析内网 IP {ip_str}！")
-                    # 抛出自定义异常
                     raise SSRFInterceptError(f"SSRF 拦截：域名解析到内网地址")
-            except ValueError:
-                pass
+            except ValueError as e:
+                if "SSRF" in str(e):
+                    raise
         return resolved
 
-def get_dl_semaphore() -> asyncio.Semaphore:
+async def get_dl_semaphore() -> asyncio.Semaphore:
     global _global_dl_semaphore
-    if _global_dl_semaphore is None:
-        _global_dl_semaphore = asyncio.Semaphore(10)
+    async with get_composer_lock():
+        if _global_dl_semaphore is None:
+            _global_dl_semaphore = asyncio.Semaphore(10)
     return _global_dl_semaphore
 
 async def get_composer_session() -> aiohttp.ClientSession:
     global _composer_session
-    if _composer_session is None or _composer_session.closed:
-        connector = aiohttp.TCPConnector(resolver=SafeResolver())
-        _composer_session = aiohttp.ClientSession(connector=connector)
+    async with get_composer_lock():
+        if _composer_session is None or _composer_session.closed:
+            connector = aiohttp.TCPConnector(resolver=SafeResolver())
+            _composer_session = aiohttp.ClientSession(connector=connector)
     return _composer_session
 
 async def close_composer_session():
     global _composer_session, _global_dl_semaphore
-    if _composer_session and not _composer_session.closed:
-        await _composer_session.close()
-        _composer_session = None
-    _global_dl_semaphore = None
+    async with get_composer_lock():
+        if _composer_session and not _composer_session.closed:
+            await _composer_session.close()
+            _composer_session = None
+        _global_dl_semaphore = None
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
     async with semaphore:
@@ -74,6 +83,8 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     downloaded_size += len(chunk)
                     if downloaded_size > MAX_IMAGE_SIZE:
                         logger.warning(f"触发 OOM 防御，截断下载: {url}")
+                        # 🚀 修复资源泄露：强行关闭连接，回收 TCP 挂起流 🚀
+                        resp.close()
                         return None
                     chunks.append(chunk)
                 return b"".join(chunks)
@@ -82,7 +93,6 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             return None
         except asyncio.CancelledError:
             raise
-        # 🚀 精准捕获自定义的安全异常 🚀
         except SSRFInterceptError:
             return None
         except Exception as e:
@@ -90,7 +100,7 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    semaphore = get_dl_semaphore()
+    semaphore = await get_dl_semaphore()
     session = await get_composer_session()
     tasks = [download_image(session, semaphore, url) for url in urls]
     results = await asyncio.gather(*tasks)
