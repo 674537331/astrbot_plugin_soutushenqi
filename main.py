@@ -16,20 +16,19 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
-MAX_BATCH_SIZE = 36
+MAX_BATCH_SIZE = 36  
 
-# 【修改1】指令提示中换成新的工具名 soutu_action
 TOOL_INSTRUCTION = (
     "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
-    "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `soutu_action` 的 Function Tool。\n"
+    "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
     "【绝对禁止以下违规行为】：\n"
     "1. 严禁使用 `astrbot_execute_ipython` 写代码搜图！\n"
     "2. 严禁使用 `astrbot_execute_shell` 搜图！\n"
     "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 的虚假链接！\n"
-    "你只需要在后台调用 `soutu_action` 工具即可。"
+    "你只需要在后台调用 `search_image_tool` 工具即可。"
 )
 
-@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.2.0")
+@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.3.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -69,9 +68,7 @@ class SouTuShenQiPlugin(Star):
         except Exception:
             return hashlib.md5(img_bytes).hexdigest()
 
-    def _calculate_and_dedup_sync(
-        self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]
-    ) -> list[tuple[str, bytes]]:
+    def _calculate_and_dedup_sync(self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
         seen_urls = {u for u, _ in items}
         seen_hashes = {self._compute_image_hash(b) for _, b in items}
         
@@ -85,7 +82,7 @@ class SouTuShenQiPlugin(Star):
         return new_bing_items
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO
+        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
@@ -97,18 +94,14 @@ class SouTuShenQiPlugin(Star):
             bing_items = await download_image_batch(bing_urls)
             
             loop = asyncio.get_running_loop()
-            new_bing_items = await loop.run_in_executor(
-                None, self._calculate_and_dedup_sync, items, bing_items
-            )
+            new_bing_items = await loop.run_in_executor(None, self._calculate_and_dedup_sync, items, bing_items)
             
             items = (items + new_bing_items)[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对数: {len(items)}")
             
         return items
 
-    async def _vlm_selection(
-        self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str
-    ) -> tuple[str, bytes, str]:
+    async def _vlm_selection(self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str) -> tuple[str, bytes, str]:
         collage_bytes, valid_items = await create_collage_from_items(items)
         if not collage_bytes or not valid_items:
             return "", b"", "图片拼合处理失败，可用图片的数据均已损坏。"
@@ -163,9 +156,7 @@ class SouTuShenQiPlugin(Star):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
-    async def _process_image_search(
-        self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool
-    ) -> tuple[bytes | None, str]:
+    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
         batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
@@ -201,15 +192,20 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
-    # 【修改2】换用全新的工具名，并像素级对齐官方文档的注释格式（没有空行，没有多余空格）
-    @filter.llm_tool(name="soutu_action")
-    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
-        '''搜索网络上的高清图片、壁纸、照片并发送给用户。
+    @filter.llm_tool(name="search_image_tool")
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False):
+        '''用于搜索网络上的高清图片、壁纸、照片并发送给用户。
+
+        本工具会先抓取大量图片，然后利用视觉大模型根据 detailed description 智能筛选最符合的一张发给用户。
+
         Args:
-            keyword(string): 具体的搜索关键词，简练精准。
-            description(string): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation(boolean): 若用户要求科普或询问时，设为true。
+            keyword(string): 必需参数。用于初步搜索的精准关键词，例如“明日香”或“星空”。
+            description(string): 必需参数。对期望图片的具体、详细的视觉描述。如果用户输入模糊，你必须自行脑补生成一个合理的、详细的视觉画面，例如“新世纪福音战士中的明日香，身穿红色战斗服，高清动漫壁纸”。
+            is_explanation(boolean): 可选参数。仅当用户明确要求科普或询问“什么是XX”时，才将其设为 true。
         '''
+        if not keyword:
+            return "系统错误：参数解析丢失。请停止使用工具，直接用文字向用户解释搜图插件遇到了故障。"
+
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
@@ -226,14 +222,12 @@ class SouTuShenQiPlugin(Star):
                 if is_explanation:
                     return f"图片已成功发送！请立刻开始向用户详细解释什么是 {keyword}。"
                 else:
-                    return "图片已发送！简单回复一句搜图完成的话语即可。"
+                    return "图片已成功发给用户！简单回复一句搜图完成的话语即可。"
             else:
-                import json
-                return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
+                return f"系统搜图失败，原因：{err_msg}。请向用户说明情况。"
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
-            import json
-            return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
+            return f"发生系统错误导致搜图中断：{str(e)}。请向用户致歉。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
