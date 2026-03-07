@@ -10,7 +10,10 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> List[str]:
-    """字符级堆栈解析器：通过括号闭合状态匹配嵌套结构并提取JSON主体，避免单纯使用正则表达式提取产生截断风险。"""
+    """
+    改进的字符级堆栈解析器。
+    通过约束在结构作用域内处理字符串标识，防御模型输出的前置孤立引号引发的提取截断问题。
+    """
     results = []
     depth = 0
     start = -1
@@ -18,13 +21,14 @@ def _extract_json_objects(text: str) -> List[str]:
     escape_next = False
 
     for i, char in enumerate(text):
-        if escape_next:
-            escape_next = False
-            continue
-        if char == '\\':
+        if depth > 0 and char == '\\':
             escape_next = True
             continue
-        if char == '"':
+        if depth > 0 and escape_next:
+            escape_next = False
+            continue
+
+        if depth > 0 and char == '"':
             in_string = not in_string
             continue
 
@@ -34,16 +38,14 @@ def _extract_json_objects(text: str) -> List[str]:
                     start = i
                 depth += 1
             elif char == '}':
-                depth -= 1
-                if depth == 0 and start != -1:
-                    results.append(text[start:i+1])
-                    start = -1
-                elif depth < 0:
-                    depth = 0
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start != -1:
+                        results.append(text[start:i+1])
+                        start = -1
     return results
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
-    """提交合成网格图像与查询文本至VLM，返回目标候选的索引。"""
     if total_count <= 0:
         return -1
 
@@ -97,7 +99,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 if 1 <= parsed_index <= total_count: return parsed_index - 1
                 raise ValueError(f"序列化提取的索引值 {parsed_index} 不在合法区间 [0, {total_count}] 内。")
                 
-            # 降级验证：若堆栈提取无效，尝试通过正则边界匹配
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
                 index = int(fallback_matches[-1].group(1))
