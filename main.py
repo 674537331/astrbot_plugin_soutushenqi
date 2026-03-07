@@ -17,7 +17,7 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.4.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.5.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -141,7 +141,6 @@ class SouTuShenQiPlugin(Star):
     async def _process_image_search(
         self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool
     ) -> tuple[bytes | None, str]:
-        # 统一收敛安全校验
         batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
@@ -178,7 +177,17 @@ class SouTuShenQiPlugin(Star):
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
     @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
+    async def tool_search_image(
+        self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
+    ):
+        """
+        用于搜索网络上的高清图片、壁纸、照片并发送给用户。
+        
+        Args:
+            keyword (str): 具体的搜索关键词，简练精准（如“猫”、“星空”）。
+            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+            is_explanation (bool): 若用户要求科普或询问"什么是XX"时，才将其设为 true。
+        """
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
