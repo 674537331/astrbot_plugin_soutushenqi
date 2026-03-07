@@ -17,7 +17,7 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比插件(完全体)", "v5.6.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.7.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -113,7 +113,8 @@ class SouTuShenQiPlugin(Star):
                         try:
                             img = img.convert('RGBA')
                             bg = Image.new("RGB", img.size, (255, 255, 255))
-                            bg.paste(img, mask=img.split()[3])
+                            # 🚀 修复 LA 模式下 [3] 的越界错误，改用 [-1] 泛用提取透明通道 🚀
+                            bg.paste(img, mask=img.split()[-1])
                             img = bg
                         except Exception as alpha_e:
                             logger.debug(f"Alpha 通道复合失败，降级转换: {alpha_e}")
