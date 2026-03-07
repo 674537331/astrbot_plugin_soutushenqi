@@ -5,11 +5,12 @@ import re
 import textwrap
 import asyncio
 import random
+from typing import List
 from astrbot.api.provider import Provider
 from astrbot.api import logger
 
-def _extract_json_objects(text: str) -> list[str]:
-    """工业级防注栈式解析器：免疫所有内部嵌套和转义陷阱"""
+def _extract_json_objects(text: str) -> List[str]:
+    """字符级堆栈解析器：通过括号闭合状态匹配嵌套结构并提取JSON主体，避免单纯使用正则表达式提取产生截断风险。"""
     results = []
     depth = 0
     start = -1
@@ -42,6 +43,7 @@ def _extract_json_objects(text: str) -> list[str]:
     return results
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
+    """提交合成网格图像与查询文本至VLM，返回目标候选的索引。"""
     if total_count <= 0:
         return -1
 
@@ -55,14 +57,13 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
         这是一张包含了 {total_count} 张图片的拼图网格，每张图片左上角都有一个数字编号。
         请仔细观察，并根据视觉需求描述：“{safe_desc}”，选出最符合要求的一张图片。
         
-        【重要规则】
-        1. 如果没有任何图片与需求相关，请严格返回 0。
-        2. 如果有符合的，请返回对应的数字编号。
+        【规则要求】
+        1. 如果所有图片均不符合上述需求，请严格返回数值 0。
+        2. 若存在符合需求的图片，请返回对应的数字编号。
         
-        你必须且只能返回一个纯净的 JSON 对象，包含 "best_index" 键。
-        【警告】绝对不允许输出任何多余的解释文本！
+        输出格式限定：仅返回一个JSON对象，包含 "best_index" 键。
         
-        示例响应：
+        示例：
         {{
           "best_index": 0
         }}
@@ -76,10 +77,9 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
             response = await vlm_provider.text_chat(prompt=prompt, image_urls=[image_url])
             
             if getattr(response, 'result_chain', None) is None:
-                raise ValueError("VLM Provider 发生故障，返回了无效的响应。")
+                raise ValueError("提供方API返回数据结构无效，未包含消息链。")
                 
             result_text = response.result_chain.get_plain_text().strip()
-            
             json_blocks = _extract_json_objects(result_text)
             parsed_index = None
             
@@ -95,34 +95,31 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
             if parsed_index is not None:
                 if parsed_index == 0: return -1 
                 if 1 <= parsed_index <= total_count: return parsed_index - 1
-                raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
+                raise ValueError(f"序列化提取的索引值 {parsed_index} 不在合法区间 [0, {total_count}] 内。")
                 
-            logger.debug("VLM 响应未能通过物理提取解析，开启正则降级。")
-                    
+            # 降级验证：若堆栈提取无效，尝试通过正则边界匹配
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
                 index = int(fallback_matches[-1].group(1))
-                
                 if index == 0: return -1
                 if 1 <= index <= total_count: return index - 1
-                # 🚀 修复隐患：强制抛出越界异常触发上层重试逻辑 🚀
-                raise ValueError(f"降级提取的序号 {index} 越界，不在有效范围 0-{total_count} 之间")
+                raise ValueError(f"正则表达式回退提取的索引值 {index} 不在合法区间 [0, {total_count}] 内。")
             else:
-                raise ValueError("未在输出中找到合法的 'best_index: [数字]' 结构。")
+                raise ValueError("输出响应未包含约定的特征键结构。")
                     
         except asyncio.CancelledError:
             raise
         except Exception as e:
             err_msg = str(e).lower()
             if any(k in err_msg for k in ["api key", "unauthorized", "blocked", "safety", "quota"]):
-                logger.error(f"遭遇不可逆的模型 API 拒绝服务，放弃重试: {e}")
+                logger.error(f"遭遇服务方拒绝服务响应 (Safety/Quota/Auth)，终止重试过程: {e}")
                 break
                 
-            logger.warning(f"VLM 选择异常 (尝试 {attempt + 1}/{retries}): {e}")
+            logger.warning(f"VLM评估执行异常 (执行次数 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
                 base_sleep = min(2 ** attempt, MAX_BACKOFF_TIME)
                 jitter = random.uniform(0, 1)
                 await asyncio.sleep(base_sleep + jitter)
                 
-    logger.error("VLM 重试均失败，降级返回第一张图。")
+    logger.error("超出最大重试限制，状态降级返回基准索引(0)。")
     return 0
