@@ -16,7 +16,7 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
-MAX_BATCH_SIZE = 36  
+MAX_BATCH_SIZE = 36
 
 TOOL_INSTRUCTION = (
     "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
@@ -84,7 +84,7 @@ class SouTuShenQiPlugin(Star):
         return new_bing_items
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
+        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
@@ -204,13 +204,13 @@ class SouTuShenQiPlugin(Star):
     async def tool_search_image(
         self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
     ):
-        """搜索网络上的高清图片、壁纸、照片并发送给用户。
+        '''搜索网络上的高清图片、壁纸、照片并发送给用户。
         
         Args:
-            keyword (str): 具体的搜索关键词，简练精准。
-            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation (bool): 若用户要求科普或询问时，设为true。
-        """
+            keyword(string): 具体的搜索关键词，简练精准。
+            description(string): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+            is_explanation(boolean): 若用户要求科普或询问时，设为true。
+        '''
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
@@ -229,9 +229,11 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
+                import json
                 return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
+            import json
             return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
 
     @filter.on_llm_request()
