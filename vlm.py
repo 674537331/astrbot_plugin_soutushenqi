@@ -43,31 +43,35 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            try:
-                clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
-                json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+            # 1. 第一优先级：高鲁棒性 JSON 块扫描
+            clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+            
+            # 🚀 修复贪婪灾难：使用非贪婪匹配找出所有的花括号结构，挨个尝试解析 🚀
+            json_matches = re.findall(r'\{.*?\}', clean_text, re.DOTALL)
+            parsed_index = None
+            
+            for match_str in json_matches:
+                try:
+                    data = json.loads(match_str)
+                    if "best_index" in data:
+                        parsed_index = int(data["best_index"])
+                        break # 找到了第一个合法的 JSON 结构就立刻停止
+                except json.JSONDecodeError:
+                    continue
+                    
+            if parsed_index is not None:
+                if parsed_index == 0: return -1 
+                if 1 <= parsed_index <= total_count: return parsed_index - 1
+                raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
                 
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    index = int(data.get("best_index", 1))
+            logger.debug("VLM 响应未能通过 JSON 解析，开启正则降级。")
                     
-                    if index == 0: return -1 
-                    if 1 <= index <= total_count: return index - 1
-                    raise ValueError(f"JSON 提取的序号 {index} 越界")
-                else:
-                    raise json.JSONDecodeError("未匹配到大括号包含的实体", result_text, 0)
-                    
-            except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
-                    
-            # 🚀 终极防幻觉降级：不仅容错引号，更加入了多结果冲突检测 🚀
+            # 2. 防御性极强的降级正则策略
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
-                # 提取所有抓取到的独立数字并去重
                 extracted_numbers = {int(m.group(1)) for m in fallback_matches}
                 
                 if len(extracted_numbers) > 1:
-                    # 如果模型输出自相矛盾 (如 "best_index: 1" 且随后又写 "best_index: 0")
                     raise ValueError(f"大模型输出了多个冲突的序号: {extracted_numbers}，拦截并打回重试。")
                     
                 index = extracted_numbers.pop()
