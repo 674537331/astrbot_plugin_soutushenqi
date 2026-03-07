@@ -28,7 +28,7 @@ TOOL_INSTRUCTION = (
     "你只需要在后台调用 `search_image_tool` 工具即可。"
 )
 
-@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.3.0")
+@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.4.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -192,19 +192,20 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
+    # 🚀 终极防空洞修复：像素级对齐官方成功案例的排版，加入空白行与严密约束 🚀
     @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False):
-        '''用于搜索网络上的高清图片、壁纸、照片并发送给用户。
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False) -> str:
+        '''根据关键词和描述在网络上搜索一张最匹配的图片发送给用户。
 
-        本工具会先抓取大量图片，然后利用视觉大模型根据 detailed description 智能筛选最符合的一张发给用户。
-
+        本工具会先根据 keyword 抓取大量图片，然后利用视觉大模型根据 detailed description 智能筛选最符合的一张发给用户。
+        
         Args:
             keyword(string): 必需参数。用于初步搜索的精准关键词，例如“明日香”或“星空”。
-            description(string): 必需参数。对期望图片的具体、详细的视觉描述。如果用户输入模糊，你必须自行脑补生成一个合理的、详细的视觉画面，例如“新世纪福音战士中的明日香，身穿红色战斗服，高清动漫壁纸”。
-            is_explanation(boolean): 可选参数。仅当用户明确要求科普或询问“什么是XX”时，才将其设为 true。
+            description(string): 必需参数。对期望图片的详细视觉描述。如果用户输入模糊，你必须自行生成一个具体的视觉画面。
+            is_explanation(boolean): 可选参数。仅当用户明确要求科普或询问时，设为 true。
         '''
         if not keyword:
-            return "系统错误：参数解析丢失。请停止使用工具，直接用文字向用户解释搜图插件遇到了故障。"
+            return "系统错误：参数解析失败。请不要再使用工具，直接用文字告诉用户系统遇到了解析错误。"
 
         try:
             if is_explanation:
