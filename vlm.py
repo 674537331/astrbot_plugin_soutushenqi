@@ -9,31 +9,47 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> list[str]:
-    """🚀 无敌的栈式括号平衡提取器：无视任何正则表达式回溯漏洞与嵌套陷阱 🚀"""
+    """🚀 工业级防注栈式解析器：免疫所有内部嵌套和转义陷阱 🚀"""
     results = []
     depth = 0
     start = -1
+    in_string = False
+    escape_next = False
+
     for i, char in enumerate(text):
-        if char == '{':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif char == '}':
-            depth -= 1
-            if depth == 0 and start != -1:
-                results.append(text[start:i+1])
-                start = -1
-            elif depth < 0:
-                # 应对不平衡的大括号异常
-                depth = 0
+        if escape_next:
+            escape_next = False
+            continue
+        if char == '\\':
+            escape_next = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if not in_string:
+            if char == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0 and start != -1:
+                    results.append(text[start:i+1])
+                    start = -1
+                elif depth < 0:
+                    depth = 0
     return results
 
 async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, description: str, total_count: int) -> int:
     if total_count <= 0:
         return -1
 
-    base64_str = base64.b64encode(image_bytes).decode('utf-8')
+    # 🚀 CPU 解放：把沉重的 10MB Base64 编码踢进线程池 🚀
+    loop = asyncio.get_running_loop()
+    base64_str = await loop.run_in_executor(None, lambda: base64.b64encode(image_bytes).decode('utf-8'))
     image_url = f"base64://{base64_str}"
+    
     safe_desc = description[:300].replace('```', '')
 
     prompt = textwrap.dedent(f"""
@@ -54,7 +70,7 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
     """).strip()
     
     retries = 3
-    MAX_BACKOFF_TIME = 16.0  # 🚀 指数退避的天花板，防止无限挂起 🚀
+    MAX_BACKOFF_TIME = 16.0 
     
     for attempt in range(retries):
         try:
@@ -65,11 +81,12 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 第一优先级：暴力平衡栈提取 JSON (彻底终结正则陷阱)
+            # 第一优先级：调用工业级栈式解析器切块
             json_blocks = _extract_json_objects(result_text)
             parsed_index = None
             
-            for block in reversed(json_blocks): # 从后往前找，因为大模型习惯把总结放最后
+            # 从后往前找，因为大模型习惯把正确的结论放最后
+            for block in reversed(json_blocks): 
                 try:
                     data = json.loads(block)
                     if "best_index" in data:
@@ -110,7 +127,6 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             logger.warning(f"VLM 选择异常 (尝试 {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                # 🚀 带封顶的随机退避 🚀
                 base_sleep = min(2 ** attempt, MAX_BACKOFF_TIME)
                 jitter = random.uniform(0, 1)
                 await asyncio.sleep(base_sleep + jitter)
