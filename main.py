@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
-import json  # 🚀 修复：移至顶层，消除局部导入的坏味道 🚀
+import json
 import asyncio
 import hashlib
 from PIL import Image, UnidentifiedImageError
@@ -28,7 +28,7 @@ TOOL_INSTRUCTION = (
     "你只需要在后台调用 `search_image_tool` 工具即可。"
 )
 
-@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.0.0")
+@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.1.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -57,16 +57,25 @@ class SouTuShenQiPlugin(Star):
                 
         return getattr(self.context, 'llm', None)
 
-    def _calculate_and_dedup_sync(
-        self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]
-    ) -> list[tuple[str, bytes]]:
+    def _compute_image_hash(self, img_bytes: bytes) -> str:
+        try:
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
+                pixels = list(img.getdata())
+                avg = sum(pixels) / len(pixels)
+                bits = "".join(['1' if p > avg else '0' for p in pixels])
+                return hex(int(bits, 2))[2:].zfill(16)
+        except Exception:
+            return hashlib.md5(img_bytes).hexdigest()
+
+    def _calculate_and_dedup_sync(self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
         seen_urls = {u for u, _ in items}
-        seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
+        seen_hashes = {self._compute_image_hash(b) for _, b in items}
         
         new_bing_items = []
         for u, b in bing_items:
             if u not in seen_urls:
-                b_hash = hashlib.md5(b).hexdigest()
+                b_hash = self._compute_image_hash(b)
                 if b_hash not in seen_hashes:
                     new_bing_items.append((u, b))
                     seen_hashes.add(b_hash)
@@ -85,18 +94,14 @@ class SouTuShenQiPlugin(Star):
             bing_items = await download_image_batch(bing_urls)
             
             loop = asyncio.get_running_loop()
-            new_bing_items = await loop.run_in_executor(
-                None, self._calculate_and_dedup_sync, items, bing_items
-            )
+            new_bing_items = await loop.run_in_executor(None, self._calculate_and_dedup_sync, items, bing_items)
             
             items = (items + new_bing_items)[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对数: {len(items)}")
             
         return items
 
-    async def _vlm_selection(
-        self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str
-    ) -> tuple[str, bytes, str]:
+    async def _vlm_selection(self, event: AstrMessageEvent, items: list[tuple[str, bytes]], eval_desc: str) -> tuple[str, bytes, str]:
         collage_bytes, valid_items = await create_collage_from_items(items)
         if not collage_bytes or not valid_items:
             return "", b"", "图片拼合处理失败，可用图片的数据均已损坏。"
@@ -151,9 +156,7 @@ class SouTuShenQiPlugin(Star):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
-    async def _process_image_search(
-        self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool
-    ) -> tuple[bytes | None, str]:
+    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
         batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
@@ -189,10 +192,17 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
+    # 🚀 绝杀修复：强行将方法签名整合为单行，并使用最严谨的、不带换行的 Docstring 参数描述 🚀
+    # 🚀 这将确保 AstrBot 的底层能够 100% 正确抓取到 Tool 拥有的参数结构 🚀
     @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(
-        self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
-    ):
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
+        '''调用此工具搜索网络上的高清图片、壁纸、照片并发送给用户。
+        
+        Args:
+            keyword (str): 具体的搜索关键词，简练精准。
+            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+            is_explanation (bool): 若用户要求科普或询问"什么是XX"时，才将其设为true。
+        '''
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
@@ -211,11 +221,10 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
-                # 🚀 移除局部的 import json，直接使用顶层导入 🚀
-                return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
+                return f"系统搜图失败，原因：{err_msg}。请向用户说明情况。"
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
-            return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
+            return f"发生系统错误导致搜图中断：{str(e)}。请向用户致歉。"
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
