@@ -32,7 +32,6 @@ async def get_browser() -> Browser:
     global _playwright_mgr, _browser
     lock = await _get_browser_lock()
     async with lock:
-        # 🚀 进程状态健康度检查，防死锁核心 🚀
         if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
@@ -87,8 +86,6 @@ async def close_scraper_session():
             _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
-    if '%3A%2F%2F' in u:
-        u = urllib.parse.unquote(u)
     if not u.startswith("http") or 'soutushenqi.com' in u:
         return False
     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
@@ -104,10 +101,12 @@ def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[s
     raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
     valid_urls = []
     for u in raw_urls:
-        if is_valid_image_url(u):
-            clean_url = u.split('@')[0].rstrip('.,;)')
-            if '%3A%2F%2F' in clean_url:
-                clean_url = urllib.parse.unquote(clean_url)
+        # 🚀 修复倒置逻辑：先清洗切掉后缀干扰（如 @100w），再校验合法性 🚀
+        clean_url = u.split('@')[0].rstrip('.,;)')
+        if '%3A%2F%2F' in clean_url:
+            clean_url = urllib.parse.unquote(clean_url)
+            
+        if is_valid_image_url(clean_url):
             if clean_url not in valid_urls:
                 valid_urls.append(clean_url)
             if len(valid_urls) >= target_count:
@@ -119,10 +118,14 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     valid_urls = []
     seen_urls = set()
     first = 0
+    pages_fetched = 0
+    max_pages = 10 # 🚀 加入绝对安全守卫，防止一直翻页遇到垃圾链接死循环 🚀
+    
     session = await get_scraper_session()
     
     try:
-        while len(valid_urls) < target_count:
+        while len(valid_urls) < target_count and pages_fetched < max_pages:
+            pages_fetched += 1
             url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
@@ -199,7 +202,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     except Exception as e:
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
-        # 🚀 严谨地独立清理 Page 和 Context，杜绝内存泄漏 🚀
         if page:
             try:
                 await page.close()
