@@ -17,7 +17,6 @@ _global_dl_semaphore = None
 _composer_lock = None
 
 def get_composer_lock() -> asyncio.Lock:
-    """🚀 同步获取锁，绝对的原子级安全，防竞态 🚀"""
     global _composer_lock
     if _composer_lock is None:
         _composer_lock = asyncio.Lock()
@@ -33,9 +32,11 @@ class SafeResolver(aiohttp.DefaultResolver):
             ip_str = info['host']
             try:
                 ip = ipaddress.ip_address(ip_str)
-                if ip.is_private or ip.is_loopback or ip.is_link_local:
-                    logger.error(f"SSRF 拦截：恶意域名 {host} 试图解析内网 IP {ip_str}！")
-                    raise SSRFInterceptError(f"SSRF 拦截：域名解析到内网地址")
+                # 🚀 补全防穿透策略：全盘封锁保留网段、多播、未指定地址等一切内网变种 🚀
+                if (ip.is_private or ip.is_loopback or ip.is_link_local or 
+                    ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
+                    logger.error(f"SSRF 致命拦截：恶意域名 {host} 试图解析内部/保留 IP {ip_str}！")
+                    raise SSRFInterceptError(f"SSRF 拦截：域名解析到内部/保留地址")
             except ValueError as e:
                 if "SSRF" in str(e):
                     raise
@@ -83,7 +84,6 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                     downloaded_size += len(chunk)
                     if downloaded_size > MAX_IMAGE_SIZE:
                         logger.warning(f"触发 OOM 防御，截断下载: {url}")
-                        # 🚀 修复资源泄露：强行关闭连接，回收 TCP 挂起流 🚀
                         resp.close()
                         return None
                     chunks.append(chunk)
