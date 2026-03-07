@@ -12,78 +12,57 @@ SCROLL_WAIT = 1000
 
 _playwright_mgr = None
 _browser: Browser = None
-_browser_lock = None
 _scraper_session = None
-_scraper_session_lock = None
-
-async def _get_browser_lock():
-    global _browser_lock
-    if _browser_lock is None:
-        _browser_lock = asyncio.Lock()
-    return _browser_lock
-
-async def _get_scraper_session_lock():
-    global _scraper_session_lock
-    if _scraper_session_lock is None:
-        _scraper_session_lock = asyncio.Lock()
-    return _scraper_session_lock
 
 async def get_browser() -> Browser:
     global _playwright_mgr, _browser
-    lock = await _get_browser_lock()
-    async with lock:
-        if _browser is None or not _browser.is_connected():
-            try:
-                logger.info("初始化全局 Playwright 浏览器实例...")
-                _playwright_mgr = await async_playwright().start()
-                _browser = await _playwright_mgr.chromium.launch(
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
-                )
-            except Exception as e:
-                logger.error(f"Playwright 浏览器初始化失败: {e}")
-                if _playwright_mgr:
-                    await _playwright_mgr.stop()
-                    _playwright_mgr = None
-                _browser = None
-                raise e
+    if _browser is None or not _browser.is_connected():
+        try:
+            logger.info("初始化全局 Playwright 浏览器实例...")
+            _playwright_mgr = await async_playwright().start()
+            _browser = await _playwright_mgr.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+            )
+        except Exception as e:
+            logger.error(f"Playwright 浏览器初始化失败: {e}")
+            if _playwright_mgr:
+                await _playwright_mgr.stop()
+                _playwright_mgr = None
+            _browser = None
+            raise e
     return _browser
 
 async def get_scraper_session() -> aiohttp.ClientSession:
     global _scraper_session
-    lock = await _get_scraper_session_lock()
-    async with lock:
-        if _scraper_session is None or _scraper_session.closed:
-            _scraper_session = aiohttp.ClientSession()
+    if _scraper_session is None or _scraper_session.closed:
+        _scraper_session = aiohttp.ClientSession()
     return _scraper_session
 
 async def close_browser():
     global _playwright_mgr, _browser
-    lock = await _get_browser_lock()
-    async with lock:
-        if _browser:
-            try:
-                await _browser.close()
-            except Exception as e:
-                logger.error(f"关闭底层 Browser 实例时发生异常: {e}")
-            finally:
-                _browser = None
-                
-        if _playwright_mgr:
-            try:
-                await _playwright_mgr.stop()
-            except Exception as e:
-                logger.error(f"关闭 Playwright Manager 时发生异常: {e}")
-            finally:
-                _playwright_mgr = None
+    if _browser:
+        try:
+            # 🚀 强制设置 5 秒大限，防范关闭阻塞产生的幽灵僵尸进程 🚀
+            await asyncio.wait_for(_browser.close(), timeout=5.0)
+        except Exception as e:
+            logger.error(f"强制关闭 Browser 实例时发生异常: {e}")
+        finally:
+            _browser = None
+            
+    if _playwright_mgr:
+        try:
+            await asyncio.wait_for(_playwright_mgr.stop(), timeout=5.0)
+        except Exception as e:
+            logger.error(f"强制关闭 Playwright Mgr 时发生异常: {e}")
+        finally:
+            _playwright_mgr = None
 
 async def close_scraper_session():
     global _scraper_session
-    lock = await _get_scraper_session_lock()
-    async with lock:
-        if _scraper_session and not _scraper_session.closed:
-            await _scraper_session.close()
-            _scraper_session = None
+    if _scraper_session and not _scraper_session.closed:
+        await _scraper_session.close()
+        _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
     if not u.startswith("http") or 'soutushenqi.com' in u: return False
@@ -94,7 +73,10 @@ def is_valid_image_url(u: str) -> bool:
     return True
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
-    raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
+    # 🚀 彻底根除 ReDoS：拆除 | 结构，使用最高效互斥正则 🚀
+    raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
+    raw_urls += re.findall(r'https?%3A%2F%2F[^\s"\'<>&]+', html_content)
+    
     valid_urls = []
     for u in raw_urls:
         clean_url = u.split('@')[0].rstrip('.,;)')
@@ -136,6 +118,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
+                # 简单纯粹的非重叠正则，防 ReDoS
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
                 
@@ -188,8 +171,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             
             for _ in range(SCROLL_TIMES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                
-                # 🚀 听取乔布斯建议：摒弃不靠谱的 networkidle，直接干脆利落地短等 🚀
+                # 抛弃脆弱的 networkidle，直接进行稳健的死等
                 await page.wait_for_timeout(SCROLL_WAIT)
                 
                 html_content = await page.content()
@@ -214,12 +196,12 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         if page:
             try:
                 await page.close()
-            except Exception as e:
-                logger.error(f"清理页面句柄异常: {e}")
+            except Exception:
+                pass
         if context:
             try:
                 await context.close()
-            except Exception as e:
-                logger.error(f"清理浏览器上下文异常: {e}")
+            except Exception:
+                pass
             
     return valid_urls[:target_count], error_msg
