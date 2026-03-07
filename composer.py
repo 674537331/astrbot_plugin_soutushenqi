@@ -3,6 +3,7 @@ import io
 import math
 import asyncio
 import aiohttp
+import socket
 import ipaddress
 from urllib.parse import urlparse
 from typing import Optional
@@ -18,6 +19,7 @@ _global_dl_semaphore = None
 
 async def _get_composer_lock():
     global _composer_session_lock
+    # 在 asyncio 单线程模型中，无 await 的 if 块是原子安全的
     if _composer_session_lock is None:
         _composer_session_lock = asyncio.Lock()
     return _composer_session_lock
@@ -45,28 +47,45 @@ async def close_composer_session():
         if _composer_session and not _composer_session.closed:
             await _composer_session.close()
             _composer_session = None
-        # 🚀 修复热重载场景下锁不释放的问题 🚀
         _global_dl_semaphore = None
 
-def is_safe_url(url: str) -> bool:
-    """🚀 防御 SSRF：拦截内网探测与元数据盗取 🚀"""
+async def is_safe_url(url: str) -> bool:
+    """🚀 终极 SSRF 防御：包含真实的 DNS 物理 IP 解析拦截 🚀"""
     try:
         host = urlparse(url).hostname
         if not host: return False
-        if host.lower() in ('localhost', '127.0.0.1', '0.0.0.0', '::1'): return False
+        
+        # 1. 表面字符串拦截
+        if host.lower() in ('localhost', '127.0.0.1', '0.0.0.0', '::1'): 
+            return False
+            
         try:
             ip = ipaddress.ip_address(host)
             if ip.is_private or ip.is_loopback or ip.is_link_local:
                 return False
+            return True # 如果本身就是合法的公网 IP 字符串，直接放行
         except ValueError:
-            pass # 是域名而非直连 IP，放行
+            pass # 是域名，需要进入 DNS 真实解析环节
+            
+        # 2. DNS 物理层解析拦截 (防止恶意域名映射到内网 IP)
+        loop = asyncio.get_running_loop()
+        # getaddrinfo 会返回目标的真实物理 IP 列表
+        addr_info = await loop.run_in_executor(None, socket.getaddrinfo, host, None)
+        
+        for info in addr_info:
+            ip_str = info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                logger.warning(f"SSRF 拦截：域名 {host} 解析出了内网 IP {ip_str}！")
+                return False
+                
         return True
     except Exception:
         return False
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
-    if not is_safe_url(url):
-        logger.warning(f"触发 SSRF 安全防御，阻断恶意请求: {url}")
+    if not await is_safe_url(url):
+        logger.warning(f"安全防御：丢弃非法或私有网络资源请求: {url}")
         return None
         
     async with semaphore:
@@ -135,8 +154,6 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
     collage = Image.new('RGB', (columns * TILE_SIZE, rows * TILE_SIZE), (255, 255, 255))
     draw = ImageDraw.Draw(collage)
     font = _get_large_font()
-    
-    # 检测是否降级到了默认字体 (默认字体没有 size 属性)
     is_default_font = getattr(font, 'size', None) is None
 
     for i, img in enumerate(successful_images):
@@ -147,11 +164,9 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
         bg_box = [x_offset + 5, y_offset + 5, x_offset + 60, y_offset + 50]
         draw.rectangle(bg_box, fill="black")
         
-        # 🚀 绝杀 VLM 近视眼：若只能用微小的默认点阵字体，则暴力拉伸放大 🚀
         if is_default_font:
             txt_img = Image.new('RGBA', (40, 20), (0, 0, 0, 0))
             ImageDraw.Draw(txt_img).text((0, 0), str(i + 1), fill="white", font=font)
-            # 使用 NEAREST 保持像素级锐利度
             txt_img = txt_img.resize((80, 40), Image.Resampling.NEAREST)
             collage.paste(txt_img, (x_offset + 10, y_offset + 10), txt_img)
         else:
