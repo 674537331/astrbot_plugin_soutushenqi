@@ -193,15 +193,12 @@ class SouTuShenQiPlugin(Star):
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
     @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False) -> str:
-        '''根据关键词和描述在网络上搜索一张最匹配的图片发送给用户。
-        
-        本工具会先根据 keyword 抓取大量图片，然后利用视觉大模型根据 detailed description 智能筛选最符合的一张发给用户。
-        
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool):
+        '''根据关键词和描述在网络上搜索一张最匹配的图片发给用户。
         Args:
-            keyword(string): 必需参数。用于初步搜索的精准关键词，例如“明日香”或“星空”。
-            description(string): 必需参数。对期望图片的详细视觉描述。如果用户输入模糊，你必须自行生成一个具体的视觉画面。
-            is_explanation(boolean): 可选参数。仅当用户明确要求科普或询问时，设为 true。
+            keyword(string): 必需，用于初步搜索的精准关键词，如"明日香"
+            description(string): 必需，对期望图片的详细视觉描述
+            is_explanation(boolean): 必需，是否为科普或询问模式，填true或false
         '''
         if not keyword:
             return "系统错误：参数解析失败。请不要再使用工具，直接用文字告诉用户系统遇到了解析错误。"
@@ -228,7 +225,7 @@ class SouTuShenQiPlugin(Star):
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
             return f"发生系统错误导致搜图中断：{str(e)}。请向用户致歉。"
-
+            
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.config.get("enable_explanation_image", True):
