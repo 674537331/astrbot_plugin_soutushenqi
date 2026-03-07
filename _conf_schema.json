@@ -21,13 +21,18 @@
   },
   "vlm_provider_id": {
     "type": "string",
-    "description": "用于图片比对的 VLM Provider ID。留空则自动使用当前对话的默认模型",
+    "description": "用于图片比对的Provider ID。留空则降级为当前Provider。",
     "default": "",
     "_special": "select_provider"
   },
   "batch_size": {
     "type": "int",
-    "description": "单批次抓取及拼图的候选图片数量（建议设置为 4 或 9，最大16）。数量越大图片质量越高，但处理时间会变长。",
+    "description": "单批次抓取及拼图的候选图片数量（建议 4-9，最大限制为 16）。数量越大图片质量越高，但处理时间会变长。",
     "default": 9
+  },
+  "min_resolution": {
+    "type": "int",
+    "description": "候选图最小宽高阈值，低于该分辨率的图片会被过滤丢弃（建议 400-800）。",
+    "default": 500
   }
 }
