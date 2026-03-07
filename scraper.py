@@ -65,10 +65,10 @@ async def close_browser():
             try:
                 await _browser.close()
             except Exception as e:
-                # 🚀 修复隐患：严禁吞噬关闭时的异常，记录幽灵进程可能 🚀
                 logger.error(f"关闭底层 Browser 实例时发生异常: {e}")
             finally:
                 _browser = None
+                
         if _playwright_mgr:
             try:
                 await _playwright_mgr.stop()
@@ -115,7 +115,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     first = 0
     pages_fetched = 0
     max_pages = 10 
-    consecutive_errors = 0 # 🚀 异常熔断器 🚀
+    consecutive_errors = 0 
     
     session = await get_scraper_session()
     
@@ -128,15 +128,13 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     if resp.status in (403, 429):
                         logger.warning(f"Bing 触发 {resp.status} 反爬拦截，主动熔断。")
                         break
-                    # 记录连续失败，超过 3 次强制退出防止死循环
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
-                        logger.warning("Bing 连续多次无响应或报错，退出翻页防死锁。")
                         break
                     first += 35
                     continue
                     
-                consecutive_errors = 0 # 成功则重置
+                consecutive_errors = 0 
                 html = await resp.text()
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
@@ -190,10 +188,9 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             
             for _ in range(SCROLL_TIMES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=SCROLL_WAIT)
-                except PlaywrightTimeoutError:
-                    pass
+                
+                # 🚀 听取乔布斯建议：摒弃不靠谱的 networkidle，直接干脆利落地短等 🚀
+                await page.wait_for_timeout(SCROLL_WAIT)
                 
                 html_content = await page.content()
                 loop = asyncio.get_running_loop()
