@@ -93,10 +93,21 @@ async def close_scraper_session():
             _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
-    if not u.startswith("http") or 'soutushenqi.com' in u: return False
-    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
-    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
+    if not low_u.startswith("http") or 'soutushenqi.com' in low_u: return False
+    
+    # 🚀 新增修复：强力拦截非图片后缀文件（尤其是 .js 脚本）🚀
+    invalid_exts = ['.js', '.css', '.html', '.php', '.json', '.xml', '.ts']
+    if any(ext in low_u for ext in invalid_exts): 
+        return False
+        
+    # 🚀 新增修复：拦截广告、统计等会触发异常的恶意第三方域名 🚀
+    blacklisted_domains = ['baidu.com', 'bdimg.com', 'bdstatic.com', 'cnzz.com', 'google-analytics.com']
+    if any(domain in low_u for domain in blacklisted_domains): 
+        return False
+        
+    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode', 'profile', 'banner']): 
+        return False
     return True
 
 def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
