@@ -18,14 +18,15 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36
 
+# 【修改1】指令提示中换成新的工具名 soutu_action
 TOOL_INSTRUCTION = (
     "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
-    "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
+    "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `soutu_action` 的 Function Tool。\n"
     "【绝对禁止以下违规行为】：\n"
     "1. 严禁使用 `astrbot_execute_ipython` 写代码搜图！\n"
     "2. 严禁使用 `astrbot_execute_shell` 搜图！\n"
     "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 的虚假链接！\n"
-    "你只需要在后台调用 `search_image_tool` 工具即可。"
+    "你只需要在后台调用 `soutu_action` 工具即可。"
 )
 
 @register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.2.0")
@@ -200,12 +201,10 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
-    @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(
-        self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
-    ):
+    # 【修改2】换用全新的工具名，并像素级对齐官方文档的注释格式（没有空行，没有多余空格）
+    @filter.llm_tool(name="soutu_action")
+    async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
         '''搜索网络上的高清图片、壁纸、照片并发送给用户。
-        
         Args:
             keyword(string): 具体的搜索关键词，简练精准。
             description(string): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
