@@ -16,7 +16,7 @@
   },
   "enable_explanation_vlm_selection": {
     "type": "bool",
-    "description": "【解释附图】是否启用大模型淘汰比对",
+    "description": "【解释附图】是否启用大模型淘汰比对（默认关闭以提升解答速度）",
     "default": false
   },
   "vlm_provider_id": {
@@ -27,7 +27,7 @@
   },
   "batch_size": {
     "type": "int",
-    "description": "单批次抓取的候选图片数量（建议设置为 4 或 9）。此参数同时决定单图模式下的最大重试次数。",
+    "description": "单批次抓取及拼图的候选图片数量（建议设置为 4 或 9，最大16）。数量越大图片质量越高，但处理时间会变长。",
     "default": 9
   }
 }
