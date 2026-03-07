@@ -9,6 +9,7 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> list[str]:
+    """工业级防注栈式解析器：免疫所有内部嵌套和转义陷阱"""
     results = []
     depth = 0
     start = -1
@@ -98,11 +99,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             logger.debug("VLM 响应未能通过物理提取解析，开启正则降级。")
                     
-            # 2. 防御性极强的降级正则策略
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
-                # 🚀 修复大模型思维链(CoT)冲突：永远以最后一次出现的有效数字为最终结论 🚀
-                # 抛弃之前过于保守的去重判定，包容模型“如你所说格式是 0，所以我选 2”的啰嗦输出
                 index = int(fallback_matches[-1].group(1))
                 
                 if index == 0: return -1
