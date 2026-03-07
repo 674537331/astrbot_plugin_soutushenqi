@@ -43,29 +43,32 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 🚀 第一优先级：使用非贪婪正则直接抽取 JSON 块，无视多余的前言后语 🚀
+            # 1. 尝试直接加载纯净 JSON
             try:
-                json_match = re.search(r'\{.*?\}', result_text, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group(0))
+                # 🚀 修复前言干扰：提取所有的疑似大括号块，永远取最后一个 🚀
+                json_matches = re.findall(r'\{.*?\}', result_text, re.DOTALL)
+                if json_matches:
+                    target_json_str = json_matches[-1]
+                    data = json.loads(target_json_str)
                     index = int(data.get("best_index", 1))
                     
                     if index == 0: return -1 
                     if 1 <= index <= total_count: return index - 1
                     raise ValueError(f"JSON 提取的序号 {index} 越界")
                 else:
-                    raise json.JSONDecodeError("未匹配到大括号包裹的JSON块", result_text, 0)
+                    raise json.JSONDecodeError("未匹配到大括号", result_text, 0)
                     
             except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
+                logger.debug(f"VLM JSON 解析失败: {e}")
                     
             # 2. 防御性极强的降级正则策略
-            fallback_match = re.search(r'(?:"best_index"\s*:\s*)(\d+)', result_text)
+            # 🚀 宽恕引号缺失的情况 🚀
+            fallback_match = re.search(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE)
             if fallback_match:
                 index = int(fallback_match.group(1))
                 if index == 0: return -1
                 if 1 <= index <= total_count: return index - 1
-                raise ValueError(f"严格降级提取的序号 {index} 越界")
+                raise ValueError(f"降级提取的序号 {index} 越界")
             else:
                 raise ValueError("未在输出中找到合法的 'best_index: [数字]' 结构。")
                     
