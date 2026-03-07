@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
+import json
 import asyncio
 import hashlib
 from PIL import Image, UnidentifiedImageError
@@ -17,7 +18,7 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.7.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.8.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -113,7 +114,6 @@ class SouTuShenQiPlugin(Star):
                         try:
                             img = img.convert('RGBA')
                             bg = Image.new("RGB", img.size, (255, 255, 255))
-                            # 🚀 修复 LA 模式下 [3] 的越界错误，改用 [-1] 泛用提取透明通道 🚀
                             bg.paste(img, mask=img.split()[-1])
                             img = bg
                         except Exception as alpha_e:
@@ -201,10 +201,11 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
-                return f"系统搜图失败: {err_msg}。"
+                # 🚀 规范化返回给 LLM 的错误，防止其乱解释 🚀
+                return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
-            return "系统错误导致搜图中断，请向用户致歉。"
+            return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
