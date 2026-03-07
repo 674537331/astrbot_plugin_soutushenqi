@@ -43,23 +43,32 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 🚀 第一优先级：暴力物理切片，防范任何正则回溯与嵌套 JSON Bug 🚀
-            start_idx = result_text.find('{')
-            end_idx = result_text.rfind('}')
-            
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                json_str = result_text[start_idx:end_idx+1]
-                try:
-                    data = json.loads(json_str)
-                    if "best_index" in data:
-                        index = int(data["best_index"])
-                        if index == 0: return -1 
-                        if 1 <= index <= total_count: return index - 1
-                        raise ValueError(f"JSON 提取的序号 {index} 越界")
-                except json.JSONDecodeError as e:
-                    logger.debug(f"VLM 物理切片 JSON 解析失败: {e}")
+            # 🚀 彻底根除物理切片 BUG：退回高鲁棒性的正则块扫描，挨个尝试解析 🚀
+            try:
+                clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+                
+                # 遍历文本中出现的所有像 JSON 的对象块（非贪婪匹配）
+                json_matches = re.findall(r'\{.*?\}', clean_text, re.DOTALL)
+                parsed_index = None
+                
+                for match_str in json_matches:
+                    try:
+                        data = json.loads(match_str)
+                        if "best_index" in data:
+                            parsed_index = int(data["best_index"])
+                            break 
+                    except json.JSONDecodeError:
+                        continue
+                        
+                if parsed_index is not None:
+                    if parsed_index == 0: return -1 
+                    if 1 <= parsed_index <= total_count: return parsed_index - 1
+                    raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
+                else:
+                    raise json.JSONDecodeError("遍历文本未找到合法 JSON", result_text, 0)
                     
-            logger.debug("VLM 响应未能通过 JSON 解析，开启正则降级。")
+            except json.JSONDecodeError as e:
+                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
                     
             # 2. 防御性极强的降级正则策略 (多冲突排查)
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
