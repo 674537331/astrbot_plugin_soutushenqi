@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
+import json  # 🚀 修复：移至顶层，消除局部导入的性能损耗与坏味道 🚀
 import asyncio
 import hashlib
 from PIL import Image, UnidentifiedImageError
@@ -17,7 +18,6 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-# 🚀 响应可维护性建议：将硬编码的系统级红线提示词提取为模块常量 🚀
 TOOL_INSTRUCTION = (
     "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
     "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
@@ -28,7 +28,7 @@ TOOL_INSTRUCTION = (
     "你只需要在后台调用 `search_image_tool` 工具即可。"
 )
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.8.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.9.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -44,14 +44,16 @@ class SouTuShenQiPlugin(Star):
         provider_id = self.config.get("vlm_provider_id", "")
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
-            if provider: return provider
+            if provider:
+                return provider
         
         umo = getattr(event, "unified_msg_origin", None)
         if umo:
             curr_id = await self.context.get_current_chat_provider_id(umo)
             if curr_id:
                 provider = self.context.get_provider_by_id(curr_id)
-                if provider: return provider
+                if provider:
+                    return provider
                 
         return getattr(self.context, 'llm', None)
 
@@ -72,6 +74,7 @@ class SouTuShenQiPlugin(Star):
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
+        
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
         logger.info(f"主来源下载完成，存活 {len(items)} 张。")
@@ -102,8 +105,10 @@ class SouTuShenQiPlugin(Star):
         if vlm_provider:
             logger.info(f"开始大模型淘汰比对 ({len(valid_items)} 选 1)...")
             best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
+            
             if best_idx == -1:
                 return "", b"", "检索到的图片均与要求无关，为保证质量已拦截。"
+                
             final_url, final_bytes = valid_items[best_idx]
             logger.info(f"VLM优胜决定：{final_url}")
             return final_url, final_bytes, ""
@@ -206,11 +211,9 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
-                import json
                 return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
-            import json
             return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
 
     @filter.on_llm_request()
