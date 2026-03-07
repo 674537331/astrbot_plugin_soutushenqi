@@ -105,7 +105,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
                 if index == 0: return -1
                 if 1 <= index <= total_count: return index - 1
-                raise ValueError(f"降级提取的序号 {index} 越界")
+                # 🚀 修复隐患：强制抛出越界异常触发上层重试逻辑 🚀
+                raise ValueError(f"降级提取的序号 {index} 越界，不在有效范围 0-{total_count} 之间")
             else:
                 raise ValueError("未在输出中找到合法的 'best_index: [数字]' 结构。")
                     
