@@ -17,7 +17,7 @@ SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.5.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比插件(完全体)", "v5.6.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -74,7 +74,9 @@ class SouTuShenQiPlugin(Star):
             bing_items = await download_image_batch(bing_urls)
             
             loop = asyncio.get_running_loop()
-            new_bing_items = await loop.run_in_executor(None, self._calculate_and_dedup_sync, items, bing_items)
+            new_bing_items = await loop.run_in_executor(
+                None, self._calculate_and_dedup_sync, items, bing_items
+            )
             
             items = (items + new_bing_items)[:batch_size]
             logger.info(f"混合补充完毕，最终参与比对数: {len(items)}")
@@ -180,14 +182,6 @@ class SouTuShenQiPlugin(Star):
     async def tool_search_image(
         self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
     ):
-        """
-        用于搜索网络上的高清图片、壁纸、照片并发送给用户。
-        
-        Args:
-            keyword (str): 具体的搜索关键词，简练精准（如“猫”、“星空”）。
-            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation (bool): 若用户要求科普或询问"什么是XX"时，才将其设为 true。
-        """
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
