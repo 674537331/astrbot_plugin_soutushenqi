@@ -16,7 +16,7 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
-MAX_BATCH_SIZE = 36  
+MAX_BATCH_SIZE = 36
 
 TOOL_INSTRUCTION = (
     "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
@@ -82,7 +82,7 @@ class SouTuShenQiPlugin(Star):
         return new_bing_items
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
+        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
@@ -192,11 +192,10 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
-    # 🚀 终极防空洞修复：像素级对齐官方成功案例的排版，加入空白行与严密约束 🚀
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False) -> str:
         '''根据关键词和描述在网络上搜索一张最匹配的图片发送给用户。
-
+        
         本工具会先根据 keyword 抓取大量图片，然后利用视觉大模型根据 detailed description 智能筛选最符合的一张发给用户。
         
         Args:
