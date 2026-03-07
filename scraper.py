@@ -65,15 +65,14 @@ async def close_browser():
             try:
                 await _browser.close()
             except Exception as e:
-                logger.error(f"关闭底层 Browser 实例时发生异常: {e}")
+                pass
             finally:
                 _browser = None
-                
         if _playwright_mgr:
             try:
                 await _playwright_mgr.stop()
             except Exception as e:
-                logger.error(f"关闭 Playwright Manager 时发生异常: {e}")
+                pass
             finally:
                 _playwright_mgr = None
 
@@ -86,22 +85,17 @@ async def close_scraper_session():
             _scraper_session = None
 
 def is_valid_image_url(u: str) -> bool:
-    if not u.startswith("http") or 'soutushenqi.com' in u:
-        return False
-    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u:
-        return False
+    if not u.startswith("http") or 'soutushenqi.com' in u: return False
+    if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
-    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']):
-        return False
-    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-        return False
+    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
+    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']): return False
     return True
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
     raw_urls = re.findall(r'https?://[^"\'\s\\<>]+|https?%3A%2F%2F[^"\'\s\\<>&]+', html_content)
     valid_urls = []
     for u in raw_urls:
-        # 🚀 修复倒置逻辑：先清洗切掉后缀干扰（如 @100w），再校验合法性 🚀
         clean_url = u.split('@')[0].rstrip('.,;)')
         if '%3A%2F%2F' in clean_url:
             clean_url = urllib.parse.unquote(clean_url)
@@ -119,17 +113,19 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     seen_urls = set()
     first = 0
     pages_fetched = 0
-    max_pages = 10 # 🚀 加入绝对安全守卫，防止一直翻页遇到垃圾链接死循环 🚀
+    max_pages = 10 
     
     session = await get_scraper_session()
     
-    try:
-        while len(valid_urls) < target_count and pages_fetched < max_pages:
-            pages_fetched += 1
-            url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
+    while len(valid_urls) < target_count and pages_fetched < max_pages:
+        pages_fetched += 1
+        url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
+        # 🚀 修复：将异常捕获置于循环内部，单页失败不影响大局 🚀
+        try:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    break
+                    first += 35
+                    continue
                 html = await resp.text()
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
@@ -147,13 +143,15 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                                 return valid_urls
                 if new_found == 0:
                     break
-                first += 35 
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.error(f"Bing 翻页抓取异常: {e}")
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.error(f"Bing 翻页抓取未知异常: {e}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug(f"Bing 翻页第 {first} 页抓取异常，忽略并继续: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Bing 翻页异常: {e}")
+            break
+            
+        first += 35 
         
     return valid_urls
 
@@ -205,12 +203,12 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         if page:
             try:
                 await page.close()
-            except Exception as e:
-                logger.error(f"清理页面句柄异常: {e}")
+            except Exception:
+                pass
         if context:
             try:
                 await context.close()
-            except Exception as e:
-                logger.error(f"清理浏览器上下文异常: {e}")
+            except Exception:
+                pass
             
     return valid_urls[:target_count], error_msg
