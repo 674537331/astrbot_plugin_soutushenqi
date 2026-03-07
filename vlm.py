@@ -43,30 +43,25 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 1. 第一优先级：高鲁棒性 JSON 块扫描
-            clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+            # 🚀 第一优先级：暴力物理切片，防范任何正则回溯与嵌套 JSON Bug 🚀
+            start_idx = result_text.find('{')
+            end_idx = result_text.rfind('}')
             
-            # 🚀 修复贪婪灾难：使用非贪婪匹配找出所有的花括号结构，挨个尝试解析 🚀
-            json_matches = re.findall(r'\{.*?\}', clean_text, re.DOTALL)
-            parsed_index = None
-            
-            for match_str in json_matches:
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = result_text[start_idx:end_idx+1]
                 try:
-                    data = json.loads(match_str)
+                    data = json.loads(json_str)
                     if "best_index" in data:
-                        parsed_index = int(data["best_index"])
-                        break # 找到了第一个合法的 JSON 结构就立刻停止
-                except json.JSONDecodeError:
-                    continue
+                        index = int(data["best_index"])
+                        if index == 0: return -1 
+                        if 1 <= index <= total_count: return index - 1
+                        raise ValueError(f"JSON 提取的序号 {index} 越界")
+                except json.JSONDecodeError as e:
+                    logger.debug(f"VLM 物理切片 JSON 解析失败: {e}")
                     
-            if parsed_index is not None:
-                if parsed_index == 0: return -1 
-                if 1 <= parsed_index <= total_count: return parsed_index - 1
-                raise ValueError(f"JSON 提取的序号 {parsed_index} 越界")
-                
             logger.debug("VLM 响应未能通过 JSON 解析，开启正则降级。")
                     
-            # 2. 防御性极强的降级正则策略
+            # 2. 防御性极强的降级正则策略 (多冲突排查)
             fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
             if fallback_matches:
                 extracted_numbers = {int(m.group(1)) for m in fallback_matches}
