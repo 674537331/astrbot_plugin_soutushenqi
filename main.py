@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import io
-import json  # 🚀 修复：移至顶层，消除局部导入的性能损耗与坏味道 🚀
 import asyncio
 import hashlib
 from PIL import Image, UnidentifiedImageError
@@ -28,7 +27,8 @@ TOOL_INSTRUCTION = (
     "你只需要在后台调用 `search_image_tool` 工具即可。"
 )
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.9.0")
+# 🚀 署名更改为你的专属标识 🚀
+@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -57,16 +57,32 @@ class SouTuShenQiPlugin(Star):
                 
         return getattr(self.context, 'llm', None)
 
+    def _compute_image_hash(self, img_bytes: bytes) -> str:
+        """🚀 引入 aHash 感知哈希：跨图床、跨压缩率的视觉级精准去重 🚀"""
+        try:
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                # 缩小到 8x8 并转为灰度图
+                img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
+                pixels = list(img.getdata())
+                avg = sum(pixels) / len(pixels)
+                # 大于平均值为 1，否则为 0，生成 64 位特征指纹
+                bits = "".join(['1' if p > avg else '0' for p in pixels])
+                return hex(int(bits, 2))[2:].zfill(16)
+        except Exception:
+            # 解析失败则降级为传统的 MD5 字节校验
+            return hashlib.md5(img_bytes).hexdigest()
+
     def _calculate_and_dedup_sync(
         self, items: list[tuple[str, bytes]], bing_items: list[tuple[str, bytes]]
     ) -> list[tuple[str, bytes]]:
         seen_urls = {u for u, _ in items}
-        seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
+        # 使用视觉特征指纹进行去重
+        seen_hashes = {self._compute_image_hash(b) for _, b in items}
         
         new_bing_items = []
         for u, b in bing_items:
             if u not in seen_urls:
-                b_hash = hashlib.md5(b).hexdigest()
+                b_hash = self._compute_image_hash(b)
                 if b_hash not in seen_hashes:
                     new_bing_items.append((u, b))
                     seen_hashes.add(b_hash)
@@ -211,9 +227,11 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
+                import json
                 return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
+            import json
             return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
 
     @filter.on_llm_request()
