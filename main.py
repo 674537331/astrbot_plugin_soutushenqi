@@ -21,20 +21,15 @@ from .composer import ComposerManager
 from .vlm import select_best_image_index
 
 JPEG_QUALITY = 85
-MIN_RESOLUTION = 500 
-
-TOOL_INSTRUCTION = (
-    "\n【搜图工具使用规范】\n"
-    "1. 当用户发出搜图、找图、看图等请求时，必须直接且仅使用 `search_image_tool` 工具。\n"
-    "2. 禁止使用其他非搜图专用工具或虚构Markdown图片链接。\n"
-    "3. 工具需接收 `keyword` 和 `description` 两个参数。\n"
-    "4. 若用户请求描述简短（如“搜一张猫”），必须基于语境将其扩写为详细的视觉描述传入 `description` 参数，以提升检索和筛选精度。"
-)
 
 @dataclass
 class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
     name: str = "search_image_tool"
-    description: str = "搜索网络上的高清图片、壁纸、照片并发送给用户。必需参数：keyword 和 description。"
+    description: str = (
+        "当用户要求搜图、找图、看图，或者在解释明确实体时需要配图时，"
+        "使用此工具搜索网络上的高清图片并发送给用户。"
+        "必须提供 keyword 和 description。"
+    )
     plugin_callback: Optional[Callable] = Field(default=None, exclude=True) 
     parameters: dict = Field(
         default_factory=lambda: {
@@ -47,6 +42,10 @@ class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
                 "description": {
                     "type": "string",
                     "description": "对期望图片的详细视觉描述。用于大语言模型进行二次视觉筛选。",
+                },
+                "is_explanation": {
+                    "type": "boolean",
+                    "description": "如果是因为解答明确实体（如介绍景点、动物等）而主动触发的配图，请设为 true。如果是用户明确要求搜图，设为 false。"
                 }
             },
             "required": ["keyword", "description"]
@@ -56,18 +55,22 @@ class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
         keyword = kwargs.get("keyword", "")
         description = kwargs.get("description", keyword)
+        is_explanation = kwargs.get("is_explanation", False)
         event = ctx.context.event
         
         if not keyword:
             return "工具调用失败：缺少必需参数 keyword。"
             
         try:
-            await event.send(event.make_result().message(f"⏳ 正在全网为您搜寻【{keyword}】的高清原图并进行 AI 视觉筛选，预计需要 20~40 秒，请稍候..."))
+            if is_explanation:
+                await event.send(event.make_result().message(f"✨ 正在为您检索【{keyword}】的相关配图，请稍候..."))
+            else:
+                await event.send(event.make_result().message(f"⏳ 正在全网为您搜寻【{keyword}】的高清原图并进行 AI 视觉筛选，预计需要 20~40 秒，请稍候..."))
         except Exception as e:
             logger.debug(f"发送状态提示异常: {e}")
             
         if self.plugin_callback:
-            return await self.plugin_callback(event, keyword, description)
+            return await self.plugin_callback(event, keyword, description, is_explanation)
         return "工具调用失败：插件实例回调未绑定。"
 
 @register("astrbot_plugin_soutushenqi", "RyanVaderAN", "智能搜图与比对插件", "v2.0.0")
@@ -78,6 +81,9 @@ class SouTuShenQiPlugin(Star):
         
         self.scraper_mgr = ScraperManager()
         self.composer_mgr = ComposerManager()
+        
+        # 🛡️ 增加 VLM 并发限流器，防止群聊高频触发时打爆 Provider 的 QPS 或导致 429
+        self._vlm_semaphore = asyncio.Semaphore(2)
         
         tool = SearchImageFunctionTool()
         tool.plugin_callback = self._execute_tool 
@@ -106,12 +112,12 @@ class SouTuShenQiPlugin(Star):
                 provider = self.context.get_provider_by_id(curr_id)
                 if provider: return provider
                 
-        return getattr(self.context, 'llm', None)
+        return None
 
-    def _validate_and_hash_sync(self, img_bytes: bytes) -> Tuple[bool, str]:
+    def _validate_and_hash_sync(self, img_bytes: bytes, min_res: int) -> Tuple[bool, str]:
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
-                if img.width < MIN_RESOLUTION or img.height < MIN_RESOLUTION:
+                if img.width < min_res or img.height < min_res:
                     return False, ""
                 img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
                 pixels = list(img.getdata())
@@ -122,18 +128,37 @@ class SouTuShenQiPlugin(Star):
             return False, ""
 
     async def _ensure_minimum_images(self, keyword: str) -> List[Tuple[str, bytes]]:
-        target_count = self.config.get("batch_size", 9)
+        try:
+            raw_count = self.config.get("batch_size", 9)
+            target_count = max(1, min(int(raw_count), 16))
+        except (TypeError, ValueError):
+            target_count = 9
+            
+        try:
+            raw_res = self.config.get("min_resolution", 500)
+            min_resolution = max(100, min(int(raw_res), 4000))
+        except (TypeError, ValueError):
+            min_resolution = 500
+            
         valid_items = []
         seen_hashes = set()
         loop = asyncio.get_running_loop()
 
         urls, _ = await self.scraper_mgr.fetch_image_urls(keyword, target_count * 4)
+        url_pool = urls.copy() if urls else []
         
-        if urls:
-            downloaded = await self.composer_mgr.download_image_batch(urls, target_count=target_count)
+        while url_pool and len(valid_items) < target_count:
+            needed = target_count - len(valid_items)
+            batch_size = min(len(url_pool), max(needed, needed * 2)) 
+            
+            batch_urls = url_pool[:batch_size]
+            url_pool = url_pool[batch_size:] 
+            
+            downloaded = await self.composer_mgr.download_image_batch(batch_urls, target_count=len(batch_urls))
+            
             for url, img_bytes in downloaded:
-                if len(valid_items) >= target_count: break
-                is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes)
+                if len(valid_items) >= target_count: break 
+                is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes, min_resolution)
                 if is_valid and b_hash not in seen_hashes:
                     valid_items.append((url, img_bytes))
                     seen_hashes.add(b_hash)
@@ -141,15 +166,24 @@ class SouTuShenQiPlugin(Star):
         logger.info(f"主图源处理完毕，当前高清去重有效图片数: {len(valid_items)}")
 
         if len(valid_items) < target_count:
-            bing_urls = await self.scraper_mgr.fetch_bing_image_urls(keyword, 20)
-            if bing_urls:
-                bing_dl = await self.composer_mgr.download_image_batch(bing_urls, target_count=target_count - len(valid_items))
+            bing_urls = await self.scraper_mgr.fetch_bing_image_urls(keyword, target_count * 3)
+            bing_pool = bing_urls.copy() if bing_urls else []
+            
+            while bing_pool and len(valid_items) < target_count:
+                needed = target_count - len(valid_items)
+                batch_size = min(len(bing_pool), max(needed, needed * 2))
+                
+                batch_urls = bing_pool[:batch_size]
+                bing_pool = bing_pool[batch_size:]
+                
+                bing_dl = await self.composer_mgr.download_image_batch(batch_urls, target_count=len(batch_urls))
                 for url, img_bytes in bing_dl:
                     if len(valid_items) >= target_count: break
-                    is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes)
+                    is_valid, b_hash = await loop.run_in_executor(None, self._validate_and_hash_sync, img_bytes, min_resolution)
                     if is_valid and b_hash not in seen_hashes:
                         valid_items.append((url, img_bytes))
                         seen_hashes.add(b_hash)
+                        
             logger.info(f"Bing 补充处理完毕，当前高清有效图片数: {len(valid_items)}")
 
         return valid_items[:target_count]
@@ -161,7 +195,9 @@ class SouTuShenQiPlugin(Star):
             
         vlm_provider = await self._get_vlm_provider(event)
         if vlm_provider:
-            best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
+            # 🛡️ 强制加锁排队，防止高并发下 API 限流封号
+            async with self._vlm_semaphore:
+                best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
             
             if best_idx == -1:
                 return "", b"", "检索到的图片均与描述严重不符，已拦截下发。"
@@ -169,6 +205,7 @@ class SouTuShenQiPlugin(Star):
             final_url, final_bytes = valid_items[best_idx]
             return final_url, final_bytes, ""
         else:
+            logger.info("VLM 模型未配置或获取失败，自动降级为首张有效候选图。")
             return valid_items[0][0], valid_items[0][1], ""
 
     def _format_image_sync(self, img_bytes: bytes) -> bytes:
@@ -193,7 +230,7 @@ class SouTuShenQiPlugin(Star):
                     return img_bytes
         except UnidentifiedImageError:
             return img_bytes
-        except Exception as e:
+        except Exception:
             return img_bytes
 
     async def _format_image(self, img_bytes: bytes) -> bytes:
@@ -233,9 +270,13 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令层搜图管线异常: {e}", exc_info=True)
             yield event.plain_result(f"处理过程中发生系统级错误: {str(e)}")
 
-    async def _execute_tool(self, event: AstrMessageEvent, keyword: str, description: str) -> str:
+    async def _execute_tool(self, event: AstrMessageEvent, keyword: str, description: str, is_explanation: bool = False) -> str:
         try:
-            use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
+            if is_explanation:
+                use_vlm = self.config.get("enable_explanation_vlm_selection", False)
+            else:
+                use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
+                
             img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
             
             if img_bytes:
@@ -251,7 +292,17 @@ class SouTuShenQiPlugin(Star):
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
+        req.system_prompt = req.system_prompt or ""
+        
+        base_rule = (
+            "\n【搜图工具使用规范】\n"
+            "1. 当用户发出搜图、找图、看图等请求时，必须直接且仅使用 `search_image_tool` 工具。\n"
+            "2. 禁止使用其他非搜图专用工具或虚构Markdown图片链接。\n"
+            "3. 若用户请求描述简短，必须扩写为详细的视觉描述传入 `description` 参数。"
+        )
+        
         if self.config.get("enable_explanation_image", True):
-            req.system_prompt = req.system_prompt or ""
-            if TOOL_INSTRUCTION not in req.system_prompt:
-                req.system_prompt += TOOL_INSTRUCTION
+            base_rule += "\n4. 【自动配图规则】当你为用户解答或介绍明确实体（如人物、景点、动植物、物品等）时，若附图能明显提升用户的理解体验，可以主动调用 `search_image_tool` 搜索并附带一张该实体的图片，同时将 `is_explanation` 参数设为 true。"
+            
+        if "【搜图工具使用规范】" not in req.system_prompt:
+            req.system_prompt += base_rule
