@@ -10,10 +10,7 @@ from astrbot.api.provider import Provider
 from astrbot.api import logger
 
 def _extract_json_objects(text: str) -> List[str]:
-    """
-    改进的字符级堆栈解析器。
-    通过约束在结构作用域内处理字符串标识，防御模型输出的前置孤立引号引发的提取截断问题。
-    """
+    """字符级堆栈解析器，增加换行状态复位防御文本污染"""
     results = []
     depth = 0
     start = -1
@@ -21,6 +18,11 @@ def _extract_json_objects(text: str) -> List[str]:
     escape_next = False
 
     for i, char in enumerate(text):
+        # 换行符重置状态，防止孤立引号导致解析失败
+        if char == '\n':
+            in_string = False
+            escape_next = False
+            
         if depth > 0 and char == '\\':
             escape_next = True
             continue
