@@ -205,13 +205,12 @@ class SouTuShenQiPlugin(Star):
     async def tool_search_image(
         self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
     ):
-        '''搜索网络上的高清图片、壁纸、照片并发送给用户。
+        """搜索网络上的高清图片、壁纸、照片并发送给用户。
         
-        Args:
-            keyword (str): 具体的搜索关键词，简练精准。
-            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation (bool): 若用户要求科普或询问时，设为true。
-        '''
+        :param keyword: 具体的搜索关键词，简练精准。
+        :param description: 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+        :param is_explanation: 若用户要求科普或询问时，设为true。
+        """
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
