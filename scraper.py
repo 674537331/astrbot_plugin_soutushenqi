@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
+import json
 import urllib.parse
 import asyncio
 import aiohttp
@@ -47,10 +48,8 @@ async def get_browser() -> Browser:
             except Exception as e:
                 logger.error(f"Playwright 浏览器初始化失败或超时: {e}")
                 if _playwright_mgr:
-                    try:
-                        await _playwright_mgr.stop()
-                    except Exception as stop_e:
-                        logger.debug(f"清理 Playwright Mgr 异常: {stop_e}")
+                    try: await _playwright_mgr.stop()
+                    except: pass
                     _playwright_mgr = None
                 _browser = None
                 raise e
@@ -69,20 +68,14 @@ async def close_browser():
     lock = await get_scraper_lock()
     async with lock:
         if _browser:
-            try:
-                await asyncio.wait_for(_browser.close(), timeout=5.0)
-            except Exception as e:
-                logger.error(f"强制关闭 Browser 实例时发生异常: {e}")
-            finally:
-                _browser = None
+            try: await asyncio.wait_for(_browser.close(), timeout=5.0)
+            except: pass
+            finally: _browser = None
                 
         if _playwright_mgr:
-            try:
-                await asyncio.wait_for(_playwright_mgr.stop(), timeout=5.0)
-            except Exception as e:
-                logger.error(f"强制关闭 Playwright Mgr 时发生异常: {e}")
-            finally:
-                _playwright_mgr = None
+            try: await asyncio.wait_for(_playwright_mgr.stop(), timeout=5.0)
+            except: pass
+            finally: _playwright_mgr = None
 
 async def close_scraper_session():
     global _scraper_session
@@ -96,48 +89,25 @@ def is_valid_image_url(u: str) -> bool:
     low_u = u.lower()
     if not low_u.startswith("http"): return False
     
-    # 🚀 修复1：解除对主图源域名的全面封杀，仅过滤UI相关的目录
-    if '/assets/' in low_u or 'favicon' in low_u: 
-        return False
+    if '/assets/' in low_u or 'favicon' in low_u: return False
         
     invalid_exts = ['.js', '.css', '.html', '.php', '.json', '.xml', '.ts', '.woff', '.ttf']
-    if any(ext in low_u for ext in invalid_exts): 
-        return False
+    if any(ext in low_u for ext in invalid_exts): return False
         
     blacklisted_domains = ['baidu.com', 'bdimg.com', 'bdstatic.com', 'cnzz.com', 'google-analytics.com']
-    if any(domain in low_u for domain in blacklisted_domains): 
-        return False
+    if any(domain in low_u for domain in blacklisted_domains): return False
         
-    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode', 'profile', 'banner']): 
-        return False
+    if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode', 'profile', 'banner']): return False
     return True
-
-def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
-    # 提取 Bing 原图的通用 JSON 属性结构
-    matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
-    found = []
-    for img_url in matches:
-        if img_url and img_url.startswith("http"):
-            low_u = img_url.lower()
-            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
-                continue
-            if img_url not in seen_urls:
-                found.append(img_url)
-                seen_urls.add(img_url)
-                if len(found) >= target_count:
-                    break
-    return found
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
     raw_urls += re.findall(r'https?%3A%2F%2F[^\s"\'<>&]+', html_content)
-    
     valid_urls = []
     for u in raw_urls:
         clean_url = u.split('@')[0].rstrip('.,;)')
         if '%3A%2F%2F' in clean_url:
             clean_url = urllib.parse.unquote(clean_url)
-            
         if is_valid_image_url(clean_url):
             if clean_url not in valid_urls:
                 valid_urls.append(clean_url)
@@ -145,56 +115,78 @@ def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[s
                 break
     return valid_urls
 
-# 🚀 修复2：将 Bing 的抓取引擎全面升级为 Playwright，彻底击穿反爬墙
+# =========================================================================
+# 🚀 吸收你提供的方案：使用标准 aiohttp 请求，精准解析 murl JSON 属性 🚀
+# =========================================================================
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
-    valid_urls = []
-    seen_urls = set()
-    context = None
-    page = None
+    search_url = "https://www.bing.com/images/search"
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
     
-    try:
-        browser = await get_browser()
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={'width': 1920, 'height': 1080},
-            ignore_https_errors=True
-        )
-        page = await context.new_page()
-        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    image_urls = []
+    seen_urls = set()
+    first = 0
+    max_pages = 10 
+    pages_fetched = 0
+    
+    session = await get_scraper_session()
+    
+    while len(image_urls) < target_count and pages_fetched < max_pages:
+        pages_fetched += 1
+        params = {"q": keyword, "first": first}
         
-        search_url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}"
-        logger.info(f"Bing 兜底引擎(Playwright)启动: {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT)
-        
-        # 滚动以触发动态加载
-        for _ in range(2):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(SCROLL_WAIT)
-            
-        html_content = await page.content()
-        loop = asyncio.get_running_loop()
-        valid_urls = await loop.run_in_executor(None, _extract_bing_urls_sync, html_content, target_count, seen_urls)
-        
-        if not valid_urls:
-            logger.warning("Bing Playwright 抓取完成，但正则未匹配到有效链接。")
-            
-    except PlaywrightTimeoutError as e:
-        logger.warning(f"Bing 节点交互超时: {str(e)}")
-    except PlaywrightError as e:
-        logger.warning(f"Bing 底层通讯异常: {str(e)}")
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.error(f"Bing 抓取管线发生异常: {str(e)}")
-    finally:
-        if page:
-            try: await asyncio.wait_for(page.close(), timeout=2.0)
-            except: pass
-        if context:
-            try: await asyncio.wait_for(context.close(), timeout=2.0)
-            except: pass
-            
-    return valid_urls
+        try:
+            logger.info(f"Bing 兜底引擎: 正在请求下标 {first} ...")
+            async with session.get(search_url, headers=headers, params=params, timeout=15) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Bing 返回状态码 {resp.status}，提前终止。")
+                    break
+                    
+                html = await resp.text()
+                
+                # 预处理：将 HTML 中的 &quot; 转回双引号，极大降低解析难度
+                html_clean = html.replace('&quot;', '"')
+                
+                # 核心提取逻辑：直接提取所有 "murl":"https://..." 的内容 (等同于解析 m="{...}")
+                matches = re.findall(r'"murl"\s*:\s*"([^"]+)"', html_clean)
+                
+                if not matches:
+                    logger.info("Bing 兜底引擎: 页面结构改变或已无更多图片，终止翻页。")
+                    break
+                
+                new_found = 0
+                for url in matches:
+                    if url not in seen_urls and is_valid_image_url(url):
+                        image_urls.append(url)
+                        seen_urls.add(url)
+                        new_found += 1
+                        if len(image_urls) >= target_count:
+                            break
+                            
+                if new_found == 0 and first > 0:
+                    logger.info("Bing 兜底引擎: 本页未发现新的有效图片，终止。")
+                    break
+                    
+                # 步进值使用匹配到的图片数量（通常一页约 35 张）
+                first += len(matches)
+                
+                if len(image_urls) < target_count:
+                    # 礼貌性延迟，防封 IP
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Bing 网络请求出错: {e}")
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Bing 抓取发生异常: {e}", exc_info=True)
+            break
+
+    logger.info(f"Bing 兜底引擎: 共获取到 {len(image_urls)} 个链接。")
+    return image_urls[:target_count]
 
 async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], str]:
     valid_urls = []
@@ -240,14 +232,10 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
         if page:
-            try:
-                await asyncio.wait_for(page.close(), timeout=2.0)
-            except Exception as e:
-                logger.debug(f"清理 Page 句柄时发生异常: {e}")
+            try: await asyncio.wait_for(page.close(), timeout=2.0)
+            except: pass
         if context:
-            try:
-                await asyncio.wait_for(context.close(), timeout=2.0)
-            except Exception as e:
-                logger.debug(f"清理 Context 句柄时发生异常: {e}")
+            try: await asyncio.wait_for(context.close(), timeout=2.0)
+            except: pass
             
     return valid_urls[:target_count], error_msg
