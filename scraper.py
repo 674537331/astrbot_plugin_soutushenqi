@@ -16,7 +16,6 @@ _scraper_session = None
 _scraper_lock = None
 
 def get_scraper_lock() -> asyncio.Lock:
-    """🚀 同步懒加载锁，百分百防并发竞态 🚀"""
     global _scraper_lock
     if _scraper_lock is None:
         _scraper_lock = asyncio.Lock()
@@ -28,15 +27,20 @@ async def get_browser() -> Browser:
         if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
-                _playwright_mgr = await async_playwright().start()
-                _browser = await _playwright_mgr.chromium.launch(
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+                # 🚀 绝杀无超时锁陷阱：为初始化套上系统级定时器 🚀
+                _playwright_mgr = await asyncio.wait_for(async_playwright().start(), timeout=10.0)
+                _browser = await asyncio.wait_for(
+                    _playwright_mgr.chromium.launch(
+                        headless=True,
+                        args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+                    ), timeout=25.0
                 )
             except Exception as e:
-                logger.error(f"Playwright 浏览器初始化失败: {e}")
+                logger.error(f"Playwright 浏览器初始化失败或超时，立刻释放锁: {e}")
                 if _playwright_mgr:
-                    await _playwright_mgr.stop()
+                    try:
+                        await _playwright_mgr.stop()
+                    except: pass
                     _playwright_mgr = None
                 _browser = None
                 raise e
@@ -80,16 +84,11 @@ def is_valid_image_url(u: str) -> bool:
     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
-    
-    parsed = urllib.parse.urlparse(low_u)
-    path = parsed.path
-    if not any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-        return False
-        
+    # 🚀 极致回调：干掉死板的后缀名校验。现代 CDN 和图床往往不带后缀。
+    # 我们有最坚不可摧的 aiohttp Content-Type 和 PIL 引擎兜底，这里应该宽容放行！
     return True
 
 def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
-    """🚀 在独立线程中处理 Bing 正则，杜绝阻塞主循环 🚀"""
     matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
     found = []
     for img_url in matches:
@@ -150,14 +149,11 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
-                
-                # 在线程池中执行繁重的正则解析
                 new_urls = await loop.run_in_executor(None, _extract_bing_urls_sync, html, target_count - len(valid_urls), seen_urls)
                 valid_urls.extend(new_urls)
                 
                 if not new_urls:
                     break
-                    
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             consecutive_errors += 1
             if consecutive_errors >= 3:
@@ -215,16 +211,13 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     except Exception as e:
         logger.error(f"Playwright 抓取管线发生全局崩溃: {str(e)}")
     finally:
-        # 🚀 修复资源残留：加入 wait_for 防止异常卡死 🚀
         if page:
             try:
                 await asyncio.wait_for(page.close(), timeout=2.0)
-            except Exception:
-                pass
+            except Exception: pass
         if context:
             try:
                 await asyncio.wait_for(context.close(), timeout=2.0)
-            except Exception:
-                pass
+            except Exception: pass
             
     return valid_urls[:target_count], error_msg
