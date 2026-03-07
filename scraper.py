@@ -64,15 +64,16 @@ async def close_browser():
         if _browser:
             try:
                 await _browser.close()
-            except Exception:
-                pass
+            except Exception as e:
+                # 🚀 修复隐患：严禁吞噬关闭时的异常，记录幽灵进程可能 🚀
+                logger.error(f"关闭底层 Browser 实例时发生异常: {e}")
             finally:
                 _browser = None
         if _playwright_mgr:
             try:
                 await _playwright_mgr.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"关闭 Playwright Manager 时发生异常: {e}")
             finally:
                 _playwright_mgr = None
 
@@ -114,6 +115,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     first = 0
     pages_fetched = 0
     max_pages = 10 
+    consecutive_errors = 0 # 🚀 异常熔断器 🚀
     
     session = await get_scraper_session()
     
@@ -123,13 +125,18 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
         try:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    # 🚀 修复 HTTP 退避：遇到封禁则直接熔断，不再无效死锁 🚀
                     if resp.status in (403, 429):
                         logger.warning(f"Bing 触发 {resp.status} 反爬拦截，主动熔断。")
+                        break
+                    # 记录连续失败，超过 3 次强制退出防止死循环
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        logger.warning("Bing 连续多次无响应或报错，退出翻页防死锁。")
                         break
                     first += 35
                     continue
                     
+                consecutive_errors = 0 # 成功则重置
                 html = await resp.text()
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
@@ -148,7 +155,9 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                 if new_found == 0:
                     break
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.debug(f"Bing 翻页第 {first} 页抓取异常，忽略并继续: {e}")
+            consecutive_errors += 1
+            if consecutive_errors >= 3:
+                break
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -170,7 +179,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             viewport={'width': 1920, 'height': 1080},
-            ignore_https_errors=True # 🚀 修复：无视野生站点的过期 SSL 证书 🚀
+            ignore_https_errors=True 
         )
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -208,12 +217,12 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         if page:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"清理页面句柄异常: {e}")
         if context:
             try:
                 await context.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"清理浏览器上下文异常: {e}")
             
     return valid_urls[:target_count], error_msg
