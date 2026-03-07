@@ -12,12 +12,15 @@ from astrbot.api import logger
 TILE_SIZE = 300
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  
 
-# --- 无锁且绝对安全的全局资源 ---
 _composer_session = None
 _global_dl_semaphore = None
 
+# 🚀 定义明确的自定义异常，符合最佳实践 🚀
+class SSRFInterceptError(Exception):
+    """用于防御 SSRF 攻击时抛出的安全中断异常"""
+    pass
+
 class SafeResolver(aiohttp.DefaultResolver):
-    """🚀 底层拦截：从 TCP 发包的根源上斩断 DNS 重绑定 SSRF 攻击 🚀"""
     async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
         resolved = await super().resolve(host, port, family)
         for info in resolved:
@@ -26,10 +29,10 @@ class SafeResolver(aiohttp.DefaultResolver):
                 ip = ipaddress.ip_address(ip_str)
                 if ip.is_private or ip.is_loopback or ip.is_link_local:
                     logger.error(f"SSRF 拦截：恶意域名 {host} 试图解析内网 IP {ip_str}！")
-                    raise ValueError(f"SSRF 拦截：域名解析到内网地址")
-            except ValueError as e:
-                if "SSRF" in str(e):
-                    raise
+                    # 抛出自定义异常
+                    raise SSRFInterceptError(f"SSRF 拦截：域名解析到内网地址")
+            except ValueError:
+                pass
         return resolved
 
 def get_dl_semaphore() -> asyncio.Semaphore:
@@ -79,10 +82,8 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             return None
         except asyncio.CancelledError:
             raise
-        except ValueError as e:
-            # 捕获我们在 SafeResolver 中主动抛出的 SSRF 异常
-            if "SSRF" in str(e): return None
-            logger.warning(f"下载异常 ({url}): {e}")
+        # 🚀 精准捕获自定义的安全异常 🚀
+        except SSRFInterceptError:
             return None
         except Exception as e:
             logger.warning(f"未预料下载异常 ({url}): {e}")
