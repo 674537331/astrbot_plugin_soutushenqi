@@ -23,7 +23,7 @@ from .composer import ComposerManager
 from .vlm import select_best_image_index
 
 JPEG_QUALITY = 85
-TARGET_VLM_COUNT = 9  # 设定VLM进行视觉比对的最佳基准图片数量
+TARGET_VLM_COUNT = 9  
 
 TOOL_INSTRUCTION = (
     "\n【搜图工具使用规范】\n"
@@ -33,50 +33,60 @@ TOOL_INSTRUCTION = (
     "4. 若用户请求描述简短（如“搜一张猫”），必须基于语境将其扩写为详细的视觉描述传入 `description` 参数，以提升检索和筛选精度。"
 )
 
-@register("astrbot_plugin_soutushenqi", "PluginDeveloper", "智能搜图与比对插件", "v7.1.0")
+# 全局实例引用，避免每次实例化插件时重新构建 Pydantic 数据类
+_plugin_instance = None
+
+@dataclass
+class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
+    name: str = "search_image_tool"
+    description: str = "搜索网络上的高清图片、壁纸、照片并发送给用户。必需参数：keyword 和 description。"
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "初步搜索的精准关键词，用于搜索引擎查询。",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "对期望图片的详细视觉描述。用于大语言模型进行二次视觉筛选。",
+                }
+            },
+            "required": ["keyword", "description"]
+        }
+    )
+
+    async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        keyword = kwargs.get("keyword", "")
+        description = kwargs.get("description", keyword)
+        event = ctx.context.event
+        
+        if not keyword:
+            return "工具调用失败：缺少必需参数 keyword。"
+            
+        # 下发中间态提示，消除长时间无响应的静默期
+        try:
+            await event.send(event.make_result().message(f"⏳ 正在全网为您搜寻【{keyword}】的高清原图并进行 AI 视觉筛选，预计需要 20~40 秒，请稍候..."))
+        except Exception as e:
+            logger.debug(f"发送中间态提示失败: {e}")
+            
+        if _plugin_instance:
+            return await _plugin_instance._execute_tool(event, keyword, description)
+        return "工具调用失败：插件实例未初始化。"
+
+@register("astrbot_plugin_soutushenqi", "PluginDeveloper", "智能搜图与比对插件", "v7.2.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
-        # 实例化子模块管理器，实现状态隔离
         self.scraper_mgr = ScraperManager()
         self.composer_mgr = ComposerManager()
         
-        plugin_ref = self
+        global _plugin_instance
+        _plugin_instance = self
         
-        # 使用 Dataclass 定义工具，确保类型系统能够准确解析参数传递
-        @dataclass
-        class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
-            name: str = "search_image_tool"
-            description: str = "搜索网络上的高清图片、壁纸、照片并发送给用户。必需参数：keyword 和 description。"
-            parameters: dict = Field(
-                default_factory=lambda: {
-                    "type": "object",
-                    "properties": {
-                        "keyword": {
-                            "type": "string",
-                            "description": "初步搜索的精准关键词，用于搜索引擎查询。",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "对期望图片的详细视觉描述。用于大语言模型进行二次视觉筛选。",
-                        }
-                    },
-                    "required": ["keyword", "description"]
-                }
-            )
-
-            async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
-                keyword = kwargs.get("keyword", "")
-                description = kwargs.get("description", keyword)
-                event = ctx.context.event
-                
-                if not keyword:
-                    return "工具调用失败：缺少必需参数 keyword。"
-                    
-                return await plugin_ref._execute_tool(event, keyword, description)
-
         try:
             self.context.add_llm_tools(SearchImageFunctionTool())
         except AttributeError:
@@ -85,12 +95,13 @@ class SouTuShenQiPlugin(Star):
 
     async def terminate(self):
         """释放插件实例持有的网络与浏览器资源"""
+        global _plugin_instance
+        _plugin_instance = None
         await self.scraper_mgr.close_all()
         await self.composer_mgr.close_all()
         logger.info("SouTuShenQi 插件资源回收完成。")
 
     async def _get_vlm_provider(self, event: AstrMessageEvent) -> Optional[Provider]:
-        """获取用于视觉筛选的大语言模型实例"""
         provider_id = self.config.get("vlm_provider_id", "")
         if provider_id:
             provider = self.context.get_provider_by_id(provider_id)
@@ -108,7 +119,6 @@ class SouTuShenQiPlugin(Star):
         return getattr(self.context, 'llm', None)
 
     def _compute_image_hash(self, img_bytes: bytes) -> str:
-        """计算图像的感知哈希，用于近似去重"""
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
                 img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
@@ -120,11 +130,6 @@ class SouTuShenQiPlugin(Star):
             return hashlib.md5(img_bytes).hexdigest()
 
     async def _ensure_minimum_images(self, keyword: str) -> List[Tuple[str, bytes]]:
-        """
-        三段式图片收集策略：
-        1. 主源初搜；2. Bing源补充；3. 关键词降级重搜。
-        确保获取足够数量的图片样本供VLM比对。
-        """
         valid_items = []
         seen_urls = set()
         seen_hashes = set()
@@ -146,18 +151,15 @@ class SouTuShenQiPlugin(Star):
                     valid_items.append((url, img_bytes))
                     seen_hashes.add(b_hash)
 
-        # 阶段 1：主图源收集
         urls, _ = await self.scraper_mgr.fetch_image_urls(keyword, 20)
         await _process_urls(urls)
         logger.info(f"主图源处理完毕，当前有效图片数: {len(valid_items)}")
 
-        # 阶段 2：Bing 兜底补充
         if len(valid_items) < TARGET_VLM_COUNT:
             bing_urls = await self.scraper_mgr.fetch_bing_image_urls(keyword, 30)
             await _process_urls(bing_urls)
             logger.info(f"Bing 补充处理完毕，当前有效图片数: {len(valid_items)}")
 
-        # 阶段 3：关键词降级兜底
         if len(valid_items) < 3:
             simplified_keyword = " ".join(keyword.split()[:2])
             if simplified_keyword and simplified_keyword != keyword:
@@ -169,10 +171,9 @@ class SouTuShenQiPlugin(Star):
         return valid_items[:TARGET_VLM_COUNT]
 
     async def _vlm_selection(self, event: AstrMessageEvent, items: List[Tuple[str, bytes]], eval_desc: str) -> Tuple[str, bytes, str]:
-        """将候选图片合成为网格，并通过VLM选择最匹配的一项"""
         collage_bytes, valid_items = await self.composer_mgr.create_collage_from_items(items)
         if not collage_bytes or not valid_items:
-            return "", b"", "图像组合处理失败，候选数据已损坏。"
+            return "", b"", "图像组合处理失败，候选数据已损坏或分辨率未达标。"
             
         vlm_provider = await self._get_vlm_provider(event)
         if vlm_provider:
@@ -187,7 +188,6 @@ class SouTuShenQiPlugin(Star):
             return valid_items[0][0], valid_items[0][1], ""
 
     def _format_image_sync(self, img_bytes: bytes) -> bytes:
-        """图像格式标准化验证，去除透明通道并统一转为JPEG格式"""
         try:
             with io.BytesIO(img_bytes) as img_io:
                 with Image.open(img_io) as img:
@@ -208,7 +208,7 @@ class SouTuShenQiPlugin(Star):
                             return buf.getvalue()
                     return img_bytes
         except UnidentifiedImageError:
-            logger.warning("捕获到 UnidentifiedImageError，图片文件头损坏或格式不受支持。")
+            logger.warning("图片文件头损坏或格式不受支持。")
             return img_bytes
         except Exception as e:
             logger.error(f"图片转码过程发生异常: {e}", exc_info=True)
@@ -219,7 +219,6 @@ class SouTuShenQiPlugin(Star):
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> Tuple[Optional[bytes], str]:
-        """执行完整的图片搜索与验证管线"""
         eval_desc = description if description else keyword
         items = await self._ensure_minimum_images(keyword)
         
@@ -253,7 +252,6 @@ class SouTuShenQiPlugin(Star):
             yield event.plain_result(f"处理过程中发生系统级错误: {str(e)}")
 
     async def _execute_tool(self, event: AstrMessageEvent, keyword: str, description: str) -> str:
-        """核心业务逻辑入口，供代理层工具调用"""
         try:
             use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
             img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
