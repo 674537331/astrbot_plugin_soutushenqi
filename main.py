@@ -200,16 +200,16 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
-    # 🚀 终极修复：使用 AstrBot 框架最标准、解析通过率 100% 的注释格式 🚀
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(
         self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
     ):
         """搜索网络上的高清图片、壁纸、照片并发送给用户。
         
-        :param keyword: 具体的搜索关键词，简练精准。
-        :param description: 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-        :param is_explanation: 若用户要求科普或询问时，设为true。
+        Args:
+            keyword (str): 具体的搜索关键词，简练精准。
+            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+            is_explanation (bool): 若用户要求科普或询问时，设为true。
         """
         try:
             if is_explanation:
@@ -229,10 +229,10 @@ class SouTuShenQiPlugin(Star):
                 else:
                     return "图片已发送！简单回复一句搜图完成的话语即可。"
             else:
-                return f"系统搜图失败，原因：{err_msg}。请向用户说明情况。"
+                return json.dumps({"status": "failed", "reason": err_msg}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"工具搜图管线崩溃: {e}", exc_info=True)
-            return f"发生系统错误导致搜图中断：{str(e)}。请向用户致歉。"
+            return json.dumps({"status": "error", "reason": f"系统错误: {str(e)}"}, ensure_ascii=False)
 
     @filter.on_llm_request()
     async def inject_explanation_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
