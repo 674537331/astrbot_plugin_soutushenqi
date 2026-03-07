@@ -70,7 +70,7 @@ class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
             return await self.plugin_callback(event, keyword, description)
         return "工具调用失败：插件实例回调未绑定。"
 
-@register("astrbot_plugin_soutushenqi", "PluginDeveloper", "智能搜图与比对插件", "v7.3.1")
+@register("astrbot_plugin_soutushenqi", "RyanVaderAN", "智能搜图与比对插件", "v2.0.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
