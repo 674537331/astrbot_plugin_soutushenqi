@@ -94,7 +94,8 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
         }
-        req_timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        # 🚀 修复：去除会引起并发任务全体超时崩盘的极短 total 限制，增加连接和读取超时控制 🚀
+        req_timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_read=15)
         try:
             async with session.get(url, headers=headers, timeout=req_timeout) as resp:
                 if resp.status != 200: return None
@@ -142,11 +143,12 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
     successful_images, valid_items = [], []
     for url, img_bytes in items:
         try:
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            img = img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
-            successful_images.append(img)
-            valid_items.append((url, img_bytes))
-        except (IOError, UnidentifiedImageError) as e:
+            # 🚀 修复：增加 with 上下文管理器，防止大量的内存和文件句柄泄露 🚀
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                converted_img = img.convert("RGB").resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+                successful_images.append(converted_img)
+                valid_items.append((url, img_bytes))
+        except Exception as e: # 捕获全部异常，任何解析失败的数据均直接抛弃
             logger.debug(f"丢弃无法识别或损坏的图像数据 ({url}): {e}")
             continue
 
