@@ -18,7 +18,6 @@ class SSRFInterceptError(Exception):
     pass
 
 class SafeResolver(aiohttp.DefaultResolver):
-    """解析器子类：拦截内部或受限IP的解析，防御SSRF攻击"""
     async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
         resolved = await super().resolve(host, port, family)
         for info in resolved:
@@ -27,14 +26,12 @@ class SafeResolver(aiohttp.DefaultResolver):
                 ip = ipaddress.ip_address(ip_str)
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or 
                     ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
-                    logger.error(f"安全策略拦截：域名 {host} 尝试解析至受限网络地址 {ip_str}。")
                     raise SSRFInterceptError("SSRF拦截机制生效：检测到受限网络地址。")
             except ValueError as e:
                 if "SSRF" in str(e): raise
         return resolved
 
 def is_safe_url_host(url: str) -> bool:
-    """过滤直接使用 IP 绕过解析器的非法请求格式"""
     try:
         host = urlparse(url).hostname
         if not host: return False
@@ -59,17 +56,21 @@ def _get_large_font():
             return ImageFont.load_default()
 
 def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
-    """生成缩略图矩阵。采用无损等比例裁剪(ImageOps.fit)避免图像拉伸形变。"""
     successful_images, valid_items = [], []
     for url, img_bytes in items:
         try:
             with Image.open(io.BytesIO(img_bytes)) as img:
-                # 核心优化：等比例居中裁剪，不破坏原图纵横比
+                # 过滤低分辨率图像（单边小于 500 像素即视为缩略图抛弃）
+                if img.width < 500 or img.height < 500:
+                    logger.debug(f"剔除低分辨率图像 ({img.width}x{img.height}): {url}")
+                    continue
+                
+                # 等比例无损裁剪，防止拉伸
                 converted_img = ImageOps.fit(img.convert("RGB"), (TILE_SIZE, TILE_SIZE), method=Image.Resampling.LANCZOS)
                 successful_images.append(converted_img)
                 valid_items.append((url, img_bytes))
         except Exception as e:
-            logger.debug(f"过滤损坏或无法识别格式的图像数据 ({url}): {e}")
+            logger.debug(f"过滤损坏或无法识别格式的图像数据: {e}")
             continue
 
     if not successful_images: return None, []
@@ -103,7 +104,6 @@ def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes
         return buffer.getvalue(), valid_items
 
 class ComposerManager:
-    """图像合成与下载管理器，隔离网络会话和并发信号量状态"""
     def __init__(self):
         self._session = None
         self._semaphore = None
@@ -149,7 +149,8 @@ class ComposerManager:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
             }
-            req_timeout = aiohttp.ClientTimeout(connect=10, sock_read=15)
+            # 快速失败机制：对于低响应速率的图床设定严格限制
+            req_timeout = aiohttp.ClientTimeout(connect=5, sock_read=8)
             try:
                 async with session.get(url, headers=headers, timeout=req_timeout) as resp:
                     if resp.status != 200: return None
@@ -161,20 +162,18 @@ class ComposerManager:
                     async for chunk in resp.content.iter_chunked(1024 * 1024):
                         downloaded_size += len(chunk)
                         if downloaded_size > MAX_IMAGE_SIZE:
-                            logger.warning(f"数据量超过设定阈值 ({MAX_IMAGE_SIZE} bytes)，终止流读取: {url}")
-                            resp.close()
+                            # 遵从审查意见：依赖 async with 自动关闭连接，移除手动 resp.close()
                             return None
                         chunks.append(chunk)
                     return b"".join(chunks)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.debug(f"建立连接或传输超时 ({url}): {e}")
+                logger.debug(f"连接或传输超时 ({url}): {e}")
                 return None
             except asyncio.CancelledError:
                 raise
             except SSRFInterceptError:
                 return None
-            except Exception as e:
-                logger.warning(f"下载过程引发未处理异常 ({url}): {e}")
+            except Exception:
                 return None
 
     async def download_image_batch(self, urls: List[str]) -> List[Tuple[str, bytes]]:
