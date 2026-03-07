@@ -43,26 +43,28 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 1. 尝试直接加载纯净 JSON
+            # 1. 第一优先级：标准 JSON 解析
             try:
-                # 🚀 修复前言干扰：提取所有的疑似大括号块，永远取最后一个 🚀
-                json_matches = re.findall(r'\{.*?\}', result_text, re.DOTALL)
-                if json_matches:
-                    target_json_str = json_matches[-1]
-                    data = json.loads(target_json_str)
+                # 剥除 Markdown 前后缀
+                clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+                
+                # 🚀 修复非贪婪陷阱：使用贪婪匹配提取最外层的完整大括号，完美包容内部嵌套 🚀
+                json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+                
+                if json_match:
+                    data = json.loads(json_match.group(0))
                     index = int(data.get("best_index", 1))
                     
                     if index == 0: return -1 
                     if 1 <= index <= total_count: return index - 1
                     raise ValueError(f"JSON 提取的序号 {index} 越界")
                 else:
-                    raise json.JSONDecodeError("未匹配到大括号", result_text, 0)
+                    raise json.JSONDecodeError("未匹配到大括号包含的实体", result_text, 0)
                     
             except json.JSONDecodeError as e:
-                logger.debug(f"VLM JSON 解析失败: {e}")
+                logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
                     
             # 2. 防御性极强的降级正则策略
-            # 🚀 宽恕引号缺失的情况 🚀
             fallback_match = re.search(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE)
             if fallback_match:
                 index = int(fallback_match.group(1))
