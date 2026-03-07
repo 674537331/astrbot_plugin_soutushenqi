@@ -59,7 +59,7 @@
 | `enable_nl_search_vlm_selection` | `true` | 【自然语言搜图】(如“帮我搜张图”) 是否启用大模型淘汰比对 |
 | `enable_explanation_image` | `true` | 【解释附图】是否启用功能（解答明确实体时自动配图） |
 | `enable_explanation_vlm_selection` | `false` | 【解释附图】是否启用大模型淘汰比对（默认关闭以提升解答速度） |
-| `vlm_provider_id` | （空） | 用于图片比对的 VLM Provider ID。留空则降级为输出第一张搜索结果 |
+| `vlm_provider_id` | （空） | 用于图片比对的 VLM Provider ID。留空则降级为默认Provider |
 | `batch_size` | `9` | 单批次抓取及拼图的候选图片数量（建议 4-9，最大限制为 16）。数量越大图片质量越高，但处理时间会变长 |
 | `min_resolution` | `500` | 候选图最小宽高阈值，低于该分辨率的图片会在清洗阶段被过滤丢弃（建议 400-800） |
 
