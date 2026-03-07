@@ -41,7 +41,7 @@ class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
                 },
                 "description": {
                     "type": "string",
-                    "description": "对期望图片的详细视觉描述。用于大语言模型进行二次视觉筛选。",
+                    "description": "对期望图片的视觉描述。注意：只描述核心主体、角色特征或整体画风，绝对禁止凭空捏造具体的特定动作、罕见场景或细枝末节（如“在电车上”等），以免导致视觉筛选过于苛刻而失败。",
                 },
                 "is_explanation": {
                     "type": "boolean",
@@ -81,8 +81,6 @@ class SouTuShenQiPlugin(Star):
         
         self.scraper_mgr = ScraperManager()
         self.composer_mgr = ComposerManager()
-        
-        # 🛡️ 增加 VLM 并发限流器，防止群聊高频触发时打爆 Provider 的 QPS 或导致 429
         self._vlm_semaphore = asyncio.Semaphore(2)
         
         tool = SearchImageFunctionTool()
@@ -188,25 +186,30 @@ class SouTuShenQiPlugin(Star):
 
         return valid_items[:target_count]
 
-    async def _vlm_selection(self, event: AstrMessageEvent, items: List[Tuple[str, bytes]], eval_desc: str) -> Tuple[str, bytes, str]:
+    async def _vlm_selection(self, event: AstrMessageEvent, items: List[Tuple[str, bytes]], eval_desc: str) -> Tuple[str, bytes, str, bool]:
         collage_bytes, valid_items = await self.composer_mgr.create_collage_from_items(items)
         if not collage_bytes or not valid_items:
-            return "", b"", "图像组合处理失败，候选数据损坏。"
+            return "", b"", "图像组合处理失败，候选数据损坏。", False
             
         vlm_provider = await self._get_vlm_provider(event)
         if vlm_provider:
-            # 🛡️ 强制加锁排队，防止高并发下 API 限流封号
             async with self._vlm_semaphore:
                 best_idx = await select_best_image_index(vlm_provider, collage_bytes, eval_desc, len(valid_items))
             
-            if best_idx == -1:
-                return "", b"", "检索到的图片均与描述严重不符，已拦截下发。"
+            # 🌟 修复魔法数字重载：明确区分拒绝(-1)和异常崩溃(-2)
+            if best_idx in (-1, -2):
+                if best_idx == -1:
+                    logger.info("VLM 判定候选图均未完美匹配描述，触发软回退，默认下发首张有效候选图。")
+                else:
+                    logger.warning("VLM 调用异常或超出重试限制，触发软回退，默认下发首张有效候选图。")
+                final_url, final_bytes = valid_items[0]
+                return final_url, final_bytes, "", True
                 
             final_url, final_bytes = valid_items[best_idx]
-            return final_url, final_bytes, ""
+            return final_url, final_bytes, "", False
         else:
             logger.info("VLM 模型未配置或获取失败，自动降级为首张有效候选图。")
-            return valid_items[0][0], valid_items[0][1], ""
+            return valid_items[0][0], valid_items[0][1], "", True
 
     def _format_image_sync(self, img_bytes: bytes) -> bytes:
         try:
@@ -237,23 +240,25 @@ class SouTuShenQiPlugin(Star):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
-    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> Tuple[Optional[bytes], str]:
+    async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> Tuple[Optional[bytes], str, bool]:
         eval_desc = description if description else keyword
         items = await self._ensure_minimum_images(keyword)
         
         if not items:
-            return None, "未找到符合分辨率要求且可访问的图像资源。"
+            return None, "未找到符合分辨率要求且可访问的图像资源。", False
 
         final_bytes = b""
+        is_fallback = False
+        
         if use_vlm_selection and len(items) > 1:
-            _, final_bytes, err_msg = await self._vlm_selection(event, items, eval_desc)
+            _, final_bytes, err_msg, is_fallback = await self._vlm_selection(event, items, eval_desc)
             if not final_bytes:
-                return None, err_msg
+                return None, err_msg, False
         else:
             _, final_bytes = items[0]
 
         final_bytes = await self._format_image(final_bytes)
-        return final_bytes, ""
+        return final_bytes, "", is_fallback
 
     @filter.command("搜图")
     async def cmd_search_image(self, event: AstrMessageEvent, keyword: str, description: str = ""):
@@ -261,9 +266,11 @@ class SouTuShenQiPlugin(Star):
             use_vlm = self.config.get("enable_cmd_vlm_selection", True)
             yield event.plain_result(f"正在处理搜图请求 [{keyword}]...")
             
-            img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
+            img_bytes, err_msg, is_fallback = await self._process_image_search(event, keyword, description, use_vlm)
             if img_bytes:
                 yield event.chain_result([Comp.Image.fromBytes(img_bytes)])
+                if is_fallback and use_vlm:
+                    yield event.plain_result("（注：本次未找到完美匹配细节的图片，已下发默认首图。如果不满意，您可以尝试描述得更具体些再搜一次~）")
             else:
                 yield event.plain_result(f"搜图失败: {err_msg}")
         except Exception as e:
@@ -277,12 +284,18 @@ class SouTuShenQiPlugin(Star):
             else:
                 use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
                 
-            img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
+            img_bytes, err_msg, is_fallback = await self._process_image_search(event, keyword, description, use_vlm)
             
             if img_bytes:
                 message_result = event.make_result()
                 message_result.chain = [Comp.Image.fromBytes(img_bytes)]
                 await event.send(message_result) 
+                
+                if is_fallback and use_vlm:
+                    return (
+                        "图像检索并下发成功。但 VLM 视觉模型未找到完美匹配描述的图片，已兜底下发默认首图。"
+                        "请在回复中告知用户：由于目前的描述不够具体或场景较为罕见，本次发送的是搜索引擎默认首图。如果这不是您想要的，请提供更详细的外观特征后重试。"
+                    )
                 return "图像检索并下发成功。"
             else:
                 return f"图像检索失败，错误原因：{err_msg}"
@@ -298,11 +311,11 @@ class SouTuShenQiPlugin(Star):
             "\n【搜图工具使用规范】\n"
             "1. 当用户发出搜图、找图、看图等请求时，必须直接且仅使用 `search_image_tool` 工具。\n"
             "2. 禁止使用其他非搜图专用工具或虚构Markdown图片链接。\n"
-            "3. 若用户请求描述简短，必须扩写为详细的视觉描述传入 `description` 参数。"
+            "3. 扩写 description 参数时，必须只描述核心主体和基础画风，绝不能虚构具体的特定动作、罕见姿势或生僻背景细节。\n"
         )
         
         if self.config.get("enable_explanation_image", True):
-            base_rule += "\n4. 【自动配图规则】当你为用户解答或介绍明确实体（如人物、景点、动植物、物品等）时，若附图能明显提升用户的理解体验，可以主动调用 `search_image_tool` 搜索并附带一张该实体的图片，同时将 `is_explanation` 参数设为 true。"
+            base_rule += "4. 【自动配图规则】当你为用户解答或介绍明确实体（如人物、景点、动植物、物品等）时，若附图能明显提升用户的理解体验，可以主动调用 `search_image_tool` 搜索并附带一张该实体的图片，同时将 `is_explanation` 参数设为 true。"
             
         if "【搜图工具使用规范】" not in req.system_prompt:
             req.system_prompt += base_rule
