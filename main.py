@@ -208,9 +208,9 @@ class SouTuShenQiPlugin(Star):
         '''搜索网络上的高清图片、壁纸、照片并发送给用户。
         
         Args:
-            keyword(string): 具体的搜索关键词，简练精准。
-            description(string): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation(boolean): 若用户要求科普或询问时，设为true。
+            keyword (str): 具体的搜索关键词，简练精准。
+            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
+            is_explanation (bool): 若用户要求科普或询问时，设为true。
         '''
         try:
             if is_explanation:
