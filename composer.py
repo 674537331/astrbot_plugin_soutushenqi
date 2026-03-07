@@ -14,7 +14,6 @@ from astrbot.api import logger
 TILE_SIZE = 300
 MAX_IMAGE_SIZE = 15 * 1024 * 1024  
 
-# 全局字体缓存，避免高并发下的同步 I/O 损耗
 _FONT_CACHE = None
 
 class SSRFInterceptError(Exception):
@@ -30,8 +29,8 @@ class SafeResolver(aiohttp.DefaultResolver):
                 if (ip.is_private or ip.is_loopback or ip.is_link_local or 
                     ip.is_multicast or getattr(ip, 'is_reserved', False) or ip.is_unspecified):
                     raise SSRFInterceptError("检测到受限网络地址。")
-            except ValueError as e:
-                if "SSRF" in str(e): raise
+            except ValueError:
+                pass 
         return resolved
 
 def is_safe_url_host(url: str) -> bool:
@@ -66,7 +65,7 @@ def _create_collage_sync(items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes
                 converted_img = ImageOps.fit(img.convert("RGB"), (TILE_SIZE, TILE_SIZE), method=Image.Resampling.LANCZOS)
                 successful_images.append(converted_img)
                 valid_items.append((url, img_bytes))
-        except Exception as e:
+        except Exception:
             continue
 
     if not successful_images: return None, []
@@ -152,10 +151,12 @@ class ComposerManager:
 
             req_timeout = aiohttp.ClientTimeout(connect=5, sock_read=8)
             try:
-                async with session.get(url, headers=headers, timeout=req_timeout) as resp:
+                async with session.get(url, headers=headers, timeout=req_timeout, allow_redirects=False) as resp:
                     if resp.status != 200: return url, None
                     content_type = resp.headers.get('Content-Type', '').lower()
-                    if 'text/html' in content_type: return url, None
+                    
+                    if not content_type.startswith('image/'):
+                        return url, None
                     
                     chunks = []
                     downloaded_size = 0
@@ -171,24 +172,28 @@ class ComposerManager:
         valid_items = []
         pending_tasks = [asyncio.create_task(self._download_image(url)) for url in urls]
         
-        for coro in asyncio.as_completed(pending_tasks):
-            if len(valid_items) >= target_count:
-                for t in pending_tasks:
-                    if not t.done(): t.cancel()
-                break 
+        try:
+            for coro in asyncio.as_completed(pending_tasks):
+                if len(valid_items) >= target_count:
+                    for t in pending_tasks:
+                        if not t.done(): t.cancel()
+                    break 
+                    
+                try:
+                    url, res = await coro
+                    if isinstance(res, bytes) and res:
+                        valid_items.append((url, res))
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    continue
+        finally:
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
                 
-            try:
-                url, res = await coro
-                if isinstance(res, bytes) and res:
-                    valid_items.append((url, res))
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                continue
-                
-        logger.info(f"Composer: 智能下载完毕，已凑齐 {len(valid_items)} 张图片。")
         return valid_items
 
+    # 🚀 补回遗失的救命方法，供 main.py 异步调用
     async def create_collage_from_items(self, items: List[Tuple[str, bytes]]) -> Tuple[Optional[bytes], List[Tuple[str, bytes]]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _create_collage_sync, items)
