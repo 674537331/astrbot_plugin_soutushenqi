@@ -14,10 +14,10 @@ from .composer import download_image_batch, create_collage_from_items, close_com
 from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
-JPEG_QUALITY = 95
+JPEG_QUALITY = 85  # 适当调低质量以确保最终体积适合平台发送
 MAX_BATCH_SIZE = 36  
 
-@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.1.0")
+@register("astrbot_plugin_soutushenqi", "YourName", "智能搜图与比对插件(完全体)", "v5.2.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -46,7 +46,12 @@ class SouTuShenQiPlugin(Star):
                 
         return getattr(self.context, 'llm', None)
 
+    def _calculate_hashes_sync(self, items: list[tuple[str, bytes]]) -> set:
+        """在线程池中计算 MD5，防阻塞"""
+        return {hashlib.md5(b).hexdigest() for _, b in items}
+
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
+        batch_size = min(batch_size, MAX_BATCH_SIZE)
         threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
@@ -59,11 +64,13 @@ class SouTuShenQiPlugin(Star):
             bing_items = await download_image_batch(bing_urls)
             
             seen_urls = {u for u, _ in items}
-            seen_hashes = {hashlib.md5(b).hexdigest() for _, b in items}
+            loop = asyncio.get_running_loop()
+            seen_hashes = await loop.run_in_executor(None, self._calculate_hashes_sync, items)
             
             new_bing_items = []
             for u, b in bing_items:
                 if u not in seen_urls:
+                    # 避免阻塞，单次哈希较轻量直接执行
                     b_hash = hashlib.md5(b).hexdigest()
                     if b_hash not in seen_hashes:
                         new_bing_items.append((u, b))
@@ -97,24 +104,25 @@ class SouTuShenQiPlugin(Star):
         try:
             with io.BytesIO(img_bytes) as img_io:
                 img = Image.open(img_io)
-                if img.format not in ['JPEG', 'PNG']:
-                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                        try:
-                            img = img.convert('RGBA')
-                            bg = Image.new("RGB", img.size, (255, 255, 255))
-                            bg.paste(img, mask=img.split()[3])
-                            img = bg
-                        except Exception as alpha_e:
-                            logger.debug(f"Alpha 通道复合失败，降级转换: {alpha_e}")
-                            img = img.convert("RGB")
-                    else:
+                
+                # 🚀 修复：无论原格式是什么，统一强制转码为 JPEG 以降低发图带宽并防御恶意的巨型 PNG 🚀
+                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                    try:
+                        img = img.convert('RGBA')
+                        bg = Image.new("RGB", img.size, (255, 255, 255))
+                        bg.paste(img, mask=img.split()[3])
+                        img = bg
+                    except Exception as alpha_e:
+                        logger.debug(f"Alpha 通道复合失败，降级转换: {alpha_e}")
                         img = img.convert("RGB")
-                        
-                    with io.BytesIO() as buf:
-                        img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-                        final_bytes = buf.getvalue()
-                    return final_bytes
-                return img_bytes
+                else:
+                    img = img.convert("RGB")
+                    
+                with io.BytesIO() as buf:
+                    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+                    final_bytes = buf.getvalue()
+                return final_bytes
+                
         except UnidentifiedImageError:
             logger.warning("捕获到 UnidentifiedImageError，图片文件损坏。")
             return img_bytes
@@ -130,7 +138,6 @@ class SouTuShenQiPlugin(Star):
         return await loop.run_in_executor(None, self._format_image_sync, img_bytes)
 
     async def _process_image_search(self, event: AstrMessageEvent, keyword: str, description: str, use_vlm_selection: bool) -> tuple[bytes | None, str]:
-        # 统一收敛上限保护逻辑
         batch_size = min(self.config.get("batch_size", 16), MAX_BATCH_SIZE)
         eval_desc = description if description else keyword
         logger.info(f"发起搜图: [{keyword}], VLM比对: {use_vlm_selection}")
@@ -168,14 +175,6 @@ class SouTuShenQiPlugin(Star):
 
     @filter.llm_tool(name="search_image_tool")
     async def tool_search_image(self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False):
-        """
-        用于搜索网络上的高清图片、壁纸、照片并发送给用户。
-        
-        Args:
-            keyword (str): 具体的搜索关键词，简练精准（如“猫”、“星空”）。
-            description (str): 对期望图片的详细视觉描述。用于大模型智能筛选最符合的图片。
-            is_explanation (bool): 若用户要求科普或询问"什么是XX"时，才将其设为 true。
-        """
         try:
             if is_explanation:
                 use_vlm = self.config.get("enable_explanation_vlm_selection", False)
