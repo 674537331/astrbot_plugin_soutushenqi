@@ -37,14 +37,19 @@ def is_valid_image_url(u: str) -> bool:
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> List[str]:
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
     raw_urls += re.findall(r'https?%3A%2F%2F[^\s"\'<>&]+', html_content)
+    
     valid_urls = []
+    seen = set() # O(1) 复杂度去重集合
+    
     for u in raw_urls:
         clean_url = u.split('@')[0].rstrip('.,;)')
         if '%3A%2F%2F' in clean_url:
             clean_url = urllib.parse.unquote(clean_url)
+            
         if is_valid_image_url(clean_url):
-            if clean_url not in valid_urls:
+            if clean_url not in seen:
                 valid_urls.append(clean_url)
+                seen.add(clean_url)
             if len(valid_urls) >= target_count:
                 break
     return valid_urls
@@ -73,6 +78,13 @@ class ScraperManager:
                             args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
                         ), timeout=25.0
                     )
+                except asyncio.TimeoutError:
+                    logger.error("Playwright 实例初始化超时。")
+                    if self._playwright_mgr:
+                        try: await self._playwright_mgr.stop()
+                        except Exception: pass
+                        self._playwright_mgr = None
+                    raise
                 except Exception as e:
                     logger.error(f"Playwright 实例初始化异常: {e}")
                     if self._playwright_mgr:
@@ -127,7 +139,6 @@ class ScraperManager:
             params = {"q": keyword, "first": first}
             
             try:
-                # 遵从审查意见：使用 ClientTimeout(total=15) 替换整型隐式传参
                 req_timeout = aiohttp.ClientTimeout(total=15)
                 async with session.get(search_url, headers=headers, params=params, timeout=req_timeout) as resp:
                     if resp.status != 200:
@@ -199,13 +210,15 @@ class ScraperManager:
                 if not valid_urls:
                     error_msg = "目标页面未包含符合验证规则的数据项。"
                     
-            except PlaywrightTimeoutError as e:
-                logger.warning(f"页面渲染与交互超时: {str(e)}")
+            except PlaywrightTimeoutError:
+                logger.warning("页面渲染与交互过程发生超时。")
             except PlaywrightError as e:
                 logger.warning(f"浏览器进程通讯异常: {str(e)}")
                 
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            logger.error("抓取管线遇到执行超时异常。")
         except Exception as e:
             logger.error(f"抓取管线发生非预期异常: {str(e)}")
         finally:
