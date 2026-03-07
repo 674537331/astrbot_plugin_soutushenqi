@@ -43,12 +43,8 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
                 
             result_text = response.result_chain.get_plain_text().strip()
             
-            # 1. 第一优先级：标准 JSON 解析
             try:
-                # 剥除 Markdown 前后缀
                 clean_text = re.sub(r'^```(json)?|```$', '', result_text, flags=re.IGNORECASE | re.MULTILINE).strip()
-                
-                # 🚀 修复非贪婪陷阱：使用贪婪匹配提取最外层的完整大括号，完美包容内部嵌套 🚀
                 json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
                 
                 if json_match:
@@ -64,10 +60,17 @@ async def select_best_image_index(vlm_provider: Provider, image_bytes: bytes, de
             except json.JSONDecodeError as e:
                 logger.debug(f"VLM JSON 解析失败，开启正则降级: {e}")
                     
-            # 2. 防御性极强的降级正则策略
-            fallback_match = re.search(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE)
-            if fallback_match:
-                index = int(fallback_match.group(1))
+            # 🚀 终极防幻觉降级：不仅容错引号，更加入了多结果冲突检测 🚀
+            fallback_matches = list(re.finditer(r'(?:"|\')?best_index(?:"|\')?\s*:\s*(\d+)', result_text, re.IGNORECASE))
+            if fallback_matches:
+                # 提取所有抓取到的独立数字并去重
+                extracted_numbers = {int(m.group(1)) for m in fallback_matches}
+                
+                if len(extracted_numbers) > 1:
+                    # 如果模型输出自相矛盾 (如 "best_index: 1" 且随后又写 "best_index: 0")
+                    raise ValueError(f"大模型输出了多个冲突的序号: {extracted_numbers}，拦截并打回重试。")
+                    
+                index = extracted_numbers.pop()
                 if index == 0: return -1
                 if 1 <= index <= total_count: return index - 1
                 raise ValueError(f"降级提取的序号 {index} 越界")
