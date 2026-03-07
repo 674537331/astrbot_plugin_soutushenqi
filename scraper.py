@@ -43,7 +43,6 @@ async def close_browser():
     global _playwright_mgr, _browser
     if _browser:
         try:
-            # 🚀 强制设置 5 秒大限，防范关闭阻塞产生的幽灵僵尸进程 🚀
             await asyncio.wait_for(_browser.close(), timeout=5.0)
         except Exception as e:
             logger.error(f"强制关闭 Browser 实例时发生异常: {e}")
@@ -69,11 +68,16 @@ def is_valid_image_url(u: str) -> bool:
     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
-    if not any(u.endswith(ext) or f"{ext}?" in u for ext in ['.jpg', '.jpeg', '.png', '.webp']): return False
+    
+    # 🚀 修复带有 hash 锚点 (#) 或 query (?) 的合法图片被误杀 🚀
+    parsed = urllib.parse.urlparse(low_u)
+    path = parsed.path
+    if not any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+        return False
+        
     return True
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
-    # 🚀 彻底根除 ReDoS：拆除 | 结构，使用最高效互斥正则 🚀
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
     raw_urls += re.findall(r'https?%3A%2F%2F[^\s"\'<>&]+', html_content)
     
@@ -118,7 +122,6 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
-                # 简单纯粹的非重叠正则，防 ReDoS
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
                 
@@ -171,7 +174,6 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
             
             for _ in range(SCROLL_TIMES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                # 抛弃脆弱的 networkidle，直接进行稳健的死等
                 await page.wait_for_timeout(SCROLL_WAIT)
                 
                 html_content = await page.content()
