@@ -3,6 +3,7 @@ import re
 import urllib.parse
 import asyncio
 import aiohttp
+import random
 from playwright.async_api import async_playwright, Browser, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from astrbot.api import logger
 
@@ -10,12 +11,20 @@ PLAYWRIGHT_TIMEOUT = 15000
 SCROLL_TIMES = 4
 SCROLL_WAIT = 1000
 
+# 🚀 引入真实浏览器的 UA 池，大幅降低防爬拦截率 🚀
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0"
+]
+
 _playwright_mgr = None
 _browser: Browser = None
 _scraper_session = None
 _scraper_lock = None
 
-def get_scraper_lock() -> asyncio.Lock:
+async def get_scraper_lock() -> asyncio.Lock:
     global _scraper_lock
     if _scraper_lock is None:
         _scraper_lock = asyncio.Lock()
@@ -23,7 +32,8 @@ def get_scraper_lock() -> asyncio.Lock:
 
 async def get_browser() -> Browser:
     global _playwright_mgr, _browser
-    async with get_scraper_lock():
+    lock = await get_scraper_lock()
+    async with lock:
         if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
@@ -40,8 +50,7 @@ async def get_browser() -> Browser:
                     try:
                         await _playwright_mgr.stop()
                     except Exception as stop_e:
-                        # 🚀 修复：严禁使用裸露的 except: pass 🚀
-                        logger.debug(f"清理失败的 Playwright Mgr 时发生异常: {stop_e}")
+                        logger.debug(f"清理 Playwright Mgr 异常: {stop_e}")
                     _playwright_mgr = None
                 _browser = None
                 raise e
@@ -49,14 +58,16 @@ async def get_browser() -> Browser:
 
 async def get_scraper_session() -> aiohttp.ClientSession:
     global _scraper_session
-    async with get_scraper_lock():
+    lock = await get_scraper_lock()
+    async with lock:
         if _scraper_session is None or _scraper_session.closed:
             _scraper_session = aiohttp.ClientSession()
     return _scraper_session
 
 async def close_browser():
     global _playwright_mgr, _browser
-    async with get_scraper_lock():
+    lock = await get_scraper_lock()
+    async with lock:
         if _browser:
             try:
                 await asyncio.wait_for(_browser.close(), timeout=5.0)
@@ -75,7 +86,8 @@ async def close_browser():
 
 async def close_scraper_session():
     global _scraper_session
-    async with get_scraper_lock():
+    lock = await get_scraper_lock()
+    async with lock:
         if _scraper_session and not _scraper_session.closed:
             await _scraper_session.close()
             _scraper_session = None
@@ -85,13 +97,22 @@ def is_valid_image_url(u: str) -> bool:
     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
-    
-    parsed = urllib.parse.urlparse(low_u)
-    path = parsed.path
-    if not any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-        return False
-        
     return True
+
+def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
+    matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
+    found = []
+    for img_url in matches:
+        if img_url and img_url.startswith("http"):
+            low_u = img_url.lower()
+            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
+                continue
+            if img_url not in seen_urls:
+                found.append(img_url)
+                seen_urls.add(img_url)
+                if len(found) >= target_count:
+                    break
+    return found
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
@@ -111,7 +132,7 @@ def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[s
     return valid_urls
 
 async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
     valid_urls = []
     seen_urls = set()
     first = 0
@@ -120,6 +141,7 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     consecutive_errors = 0 
     
     session = await get_scraper_session()
+    loop = asyncio.get_running_loop()
     
     while len(valid_urls) < target_count and pages_fetched < max_pages:
         pages_fetched += 1
@@ -138,24 +160,12 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
-                matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
-                new_found = 0
+                new_urls = await loop.run_in_executor(None, _extract_bing_urls_sync, html, target_count - len(valid_urls), seen_urls)
+                valid_urls.extend(new_urls)
                 
-                for img_url in matches:
-                    if img_url and img_url.startswith("http"):
-                        low_u = img_url.lower()
-                        if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
-                            continue
-                        if img_url not in seen_urls:
-                            valid_urls.append(img_url)
-                            seen_urls.add(img_url)
-                            new_found += 1
-                            if len(valid_urls) >= target_count:
-                                return valid_urls
-                if new_found == 0:
+                if not new_urls:
                     break
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            # 🚀 修复未使用异常变量的坏味道 🚀
             logger.debug(f"Bing 网络请求错误或超时: {e}")
             consecutive_errors += 1
             if consecutive_errors >= 3:
@@ -179,7 +189,7 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
     try:
         browser = await get_browser()
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            user_agent=random.choice(USER_AGENTS),
             viewport={'width': 1920, 'height': 1080},
             ignore_https_errors=True 
         )
