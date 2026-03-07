@@ -4,6 +4,14 @@ import json
 import asyncio
 import hashlib
 from PIL import Image, UnidentifiedImageError
+
+# 🚀 引入官方文档中最稳健的强类型工具类库 🚀
+from pydantic import Field
+from pydantic.dataclasses import dataclass
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from astrbot.core.astr_agent_context import AstrAgentContext
+
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
@@ -16,23 +24,70 @@ from .vlm import select_best_image_index
 
 SUPPLEMENT_THRESHOLD_RATIO = 0.3
 JPEG_QUALITY = 85
-MAX_BATCH_SIZE = 36
+MAX_BATCH_SIZE = 36  
 
 TOOL_INSTRUCTION = (
-    "\n【🔴 致命红线警告：搜图行为规范 🔴】\n"
-    "当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
-    "【绝对禁止以下违规行为】：\n"
-    "1. 严禁使用 `astrbot_execute_ipython` 写代码搜图！\n"
-    "2. 严禁使用 `astrbot_execute_shell` 搜图！\n"
-    "3. 严禁你自己捏造或输出带有 [CQ:image,file=...] 或 Markdown 的虚假链接！\n"
-    "你只需要在后台调用 `search_image_tool` 工具即可。"
+    "\n【🔴 搜图行为规范与参数要求 🔴】\n"
+    "1. 当用户要求搜图、找图、看图时，你【必须直接且仅使用】名为 `search_image_tool` 的 Function Tool。\n"
+    "2. 严禁使用 `astrbot_execute_ipython` 或捏造 Markdown 虚假链接搜图！\n"
+    "3. 调用 `search_image_tool` 时，必须传入 `keyword` 和 `description` 两个参数。\n"
+    "4. 如果用户的要求非常简短模糊（如“搜一张明日香”），你【必须】自行脑补扩写 `description`，"
+    "描绘出一个详细、高质量的视觉画面（例如：“新世纪福音战士中的明日香，身穿红色战斗服，高清动漫壁纸”），以提高搜图质量。"
 )
 
-@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.4.0")
+@register("astrbot_plugin_soutushenqi", "RyanVaderAn", "智能搜图与比对插件(究极版)", "v6.8.0")
 class SouTuShenQiPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
+        
+        # 将自身实例捕获到闭包中，供内部的数据类调用
+        plugin_ref = self
+        
+        # =====================================================================
+        # 🚀 绝杀手段：使用强类型 Dataclass 定义工具，彻底绕过框架脆弱的注释解析器！
+        # 这个结构会原封不动地交给大模型，保证参数 100% 传递成功！
+        # =====================================================================
+        @dataclass
+        class SearchImageFunctionTool(FunctionTool[AstrAgentContext]):
+            name: str = "search_image_tool"
+            description: str = "搜索网络上的高清图片、壁纸、照片并发送给用户。必须传入keyword和description。"
+            parameters: dict = Field(
+                default_factory=lambda: {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "初步搜索的精准关键词，例如“明日香”或“星空”。",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "对期望图片的详细视觉描述。如果用户输入模糊，你必须自行脑补生成一个具体的画面描述以辅助筛选。",
+                        }
+                    },
+                    "required": ["keyword", "description"]
+                }
+            )
+
+            async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+                # 安全获取参数，再也不怕框架弄丢参数了！
+                keyword = kwargs.get("keyword", "")
+                description = kwargs.get("description", keyword)
+                event = ctx.context.event
+                
+                if not keyword:
+                    return "系统错误：缺少必需参数 keyword。请不要再使用工具，直接用文字告诉用户系统故障。"
+                    
+                # 调用主类的搜图业务逻辑
+                return await plugin_ref._execute_tool(event, keyword, description)
+
+        # 兼容不同 AstrBot 版本的工具注册方式
+        try:
+            self.context.add_llm_tools(SearchImageFunctionTool())
+        except AttributeError:
+            tool_mgr = self.context.provider_manager.llm_tools
+            tool_mgr.func_list.append(SearchImageFunctionTool())
+        # =====================================================================
 
     async def terminate(self):
         await close_browser()
@@ -82,7 +137,7 @@ class SouTuShenQiPlugin(Star):
         return new_bing_items
 
     async def _ensure_minimum_images(self, keyword: str, batch_size: int) -> list[tuple[str, bytes]]:
-        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO
+        threshold = batch_size * SUPPLEMENT_THRESHOLD_RATIO  
         
         urls, _ = await fetch_image_urls(keyword, batch_size)
         items = await download_image_batch(urls)
@@ -192,23 +247,11 @@ class SouTuShenQiPlugin(Star):
             logger.error(f"指令搜图管线崩溃: {e}", exc_info=True)
             yield event.plain_result(f"抱歉，搜图执行期间发生系统错误: {str(e)}")
 
-    @filter.llm_tool(name="search_image_tool")
-    async def tool_search_image(
-        self, event: AstrMessageEvent, keyword: str, description: str = "", is_explanation: bool = False
-    ):
-        '''根据关键词搜索图片，并可选是否启用 VLM 智能筛选。
-        
-        Args:
-            keyword(string): 搜索图片的关键词。
-            description(string): 用于筛选图片的详细描述，越具体越好。
-            is_explanation(boolean): 是否为解释模式，默认为 False。
-        '''
+    # 拆分出来的核心搜图执行逻辑，供 Dataclass 工具内部调用
+    async def _execute_tool(self, event: AstrMessageEvent, keyword: str, description: str):
         try:
-            if is_explanation:
-                use_vlm = self.config.get("enable_explanation_vlm_selection", False)
-            else:
-                use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
-                
+            # 默认调用 VLM 挑选
+            use_vlm = self.config.get("enable_nl_search_vlm_selection", True)
             img_bytes, err_msg = await self._process_image_search(event, keyword, description, use_vlm)
             
             if img_bytes:
@@ -216,10 +259,7 @@ class SouTuShenQiPlugin(Star):
                 message_result.chain = [Comp.Image.fromBytes(img_bytes)]
                 await event.send(message_result) 
                 
-                if is_explanation:
-                    return f"图片已成功发送！请立刻开始向用户详细解释什么是 {keyword}。"
-                else:
-                    return "图片已发送！简单回复一句搜图完成的话语即可。"
+                return "图片已成功发送给用户！简单回复一句搜图完成的话语即可。"
             else:
                 return f"系统搜图失败，原因：{err_msg}。请向用户说明情况。"
         except Exception as e:
