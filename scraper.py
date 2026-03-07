@@ -36,7 +36,6 @@ class ScraperManager:
         self._lock = None
 
     def _ensure_primitives(self):
-        # 同步初始化，利用 asyncio 单线程特性彻底避免竞态条件
         if self._lock is None:
             self._lock = asyncio.Lock()
 
@@ -44,6 +43,10 @@ class ScraperManager:
         self._ensure_primitives()
         async with self._lock:
             if self._browser is None or not self._browser.is_connected():
+                if self._playwright_mgr:
+                    try: await self._playwright_mgr.stop()
+                    except Exception: pass
+                    
                 try:
                     self._playwright_mgr = await asyncio.wait_for(async_playwright().start(), timeout=10.0)
                     self._browser = await asyncio.wait_for(
@@ -59,7 +62,7 @@ class ScraperManager:
                         except Exception: pass
                         self._playwright_mgr = None
                     self._browser = None
-                    raise e
+                    raise 
         return self._browser
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -102,7 +105,7 @@ class ScraperManager:
         first, pages_fetched, max_pages = 0, 0, 10 
         session = await self._get_session()
         loop = asyncio.get_running_loop()
-        bing_timeout = aiohttp.ClientTimeout(total=15) # 修复: 替换硬编码的整数超时
+        bing_timeout = aiohttp.ClientTimeout(total=15)
         
         while len(image_urls) < target_count and pages_fetched < max_pages:
             pages_fetched += 1
@@ -114,13 +117,15 @@ class ScraperManager:
                     new_urls = await loop.run_in_executor(None, self._extract_bing_urls_sync, html, target_count - len(image_urls), seen_urls)
                     if not new_urls: break
                     image_urls.extend(new_urls)
-                    first += len(new_urls) + 10
-            except Exception:
+                    first += 35 
+            except Exception as e:
+                logger.debug(f"Bing 备用图源抓取遇到错误: {e}")
                 break
         return image_urls[:target_count]
 
     async def fetch_image_urls(self, keyword: str, target_count: int) -> Tuple[List[str], str]:
         valid_urls = []
+        seen_urls = set()
         error_msg = ""
         context = None
         page = None
@@ -136,6 +141,9 @@ class ScraperManager:
             await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             async def handle_response(response):
+                # 🚀 优化点：超限拦截器，防止无意义的内存追加和处理
+                if len(valid_urls) >= target_count: return
+                
                 if response.request.resource_type in ["fetch", "xhr"] and response.status == 200:
                     try:
                         if "image" in response.headers.get("content-type", ""): return
@@ -143,10 +151,12 @@ class ScraperManager:
                         if not json_data: return
                         if "data" in json_data and isinstance(json_data["data"], list):
                             for item in json_data["data"]:
+                                if len(valid_urls) >= target_count: break # 🚀 早停退出
                                 large_url = item.get("largeUrl")
                                 width = item.get("width", 0)
                                 if large_url and isinstance(large_url, str) and large_url.startswith("http") and width > 400:
-                                    if is_valid_image_url(large_url) and large_url not in valid_urls:
+                                    if is_valid_image_url(large_url) and large_url not in seen_urls:
+                                        seen_urls.add(large_url)
                                         valid_urls.append(large_url)
                     except Exception:
                         pass
