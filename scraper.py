@@ -27,7 +27,6 @@ async def get_browser() -> Browser:
         if _browser is None or not _browser.is_connected():
             try:
                 logger.info("初始化全局 Playwright 浏览器实例...")
-                # 🚀 绝杀无超时锁陷阱：为初始化套上系统级定时器 🚀
                 _playwright_mgr = await asyncio.wait_for(async_playwright().start(), timeout=10.0)
                 _browser = await asyncio.wait_for(
                     _playwright_mgr.chromium.launch(
@@ -36,11 +35,13 @@ async def get_browser() -> Browser:
                     ), timeout=25.0
                 )
             except Exception as e:
-                logger.error(f"Playwright 浏览器初始化失败或超时，立刻释放锁: {e}")
+                logger.error(f"Playwright 浏览器初始化失败或超时: {e}")
                 if _playwright_mgr:
                     try:
                         await _playwright_mgr.stop()
-                    except: pass
+                    except Exception as stop_e:
+                        # 🚀 修复：严禁使用裸露的 except: pass 🚀
+                        logger.debug(f"清理失败的 Playwright Mgr 时发生异常: {stop_e}")
                     _playwright_mgr = None
                 _browser = None
                 raise e
@@ -84,24 +85,13 @@ def is_valid_image_url(u: str) -> bool:
     if 'baidu.com' in u or 'bdimg.com' in u or 'bdstatic.com' in u: return False
     low_u = u.lower()
     if any(x in low_u for x in ['avatar', 'logo', 'icon', 'qrcode']): return False
-    # 🚀 极致回调：干掉死板的后缀名校验。现代 CDN 和图床往往不带后缀。
-    # 我们有最坚不可摧的 aiohttp Content-Type 和 PIL 引擎兜底，这里应该宽容放行！
+    
+    parsed = urllib.parse.urlparse(low_u)
+    path = parsed.path
+    if not any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+        return False
+        
     return True
-
-def _extract_bing_urls_sync(html: str, target_count: int, seen_urls: set) -> list[str]:
-    matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
-    found = []
-    for img_url in matches:
-        if img_url and img_url.startswith("http"):
-            low_u = img_url.lower()
-            if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
-                continue
-            if img_url not in seen_urls:
-                found.append(img_url)
-                seen_urls.add(img_url)
-                if len(found) >= target_count:
-                    break
-    return found
 
 def _extract_urls_from_html_sync(html_content: str, target_count: int) -> list[str]:
     raw_urls = re.findall(r'https?://[^\s"\'<>]+', html_content)
@@ -130,7 +120,6 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     consecutive_errors = 0 
     
     session = await get_scraper_session()
-    loop = asyncio.get_running_loop()
     
     while len(valid_urls) < target_count and pages_fetched < max_pages:
         pages_fetched += 1
@@ -149,12 +138,25 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
                     
                 consecutive_errors = 0 
                 html = await resp.text()
-                new_urls = await loop.run_in_executor(None, _extract_bing_urls_sync, html, target_count - len(valid_urls), seen_urls)
-                valid_urls.extend(new_urls)
+                matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
+                new_found = 0
                 
-                if not new_urls:
+                for img_url in matches:
+                    if img_url and img_url.startswith("http"):
+                        low_u = img_url.lower()
+                        if any(x in low_u for x in ['avatar', 'logo', 'icon', 'profile']):
+                            continue
+                        if img_url not in seen_urls:
+                            valid_urls.append(img_url)
+                            seen_urls.add(img_url)
+                            new_found += 1
+                            if len(valid_urls) >= target_count:
+                                return valid_urls
+                if new_found == 0:
                     break
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # 🚀 修复未使用异常变量的坏味道 🚀
+            logger.debug(f"Bing 网络请求错误或超时: {e}")
             consecutive_errors += 1
             if consecutive_errors >= 3:
                 break
@@ -214,10 +216,12 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         if page:
             try:
                 await asyncio.wait_for(page.close(), timeout=2.0)
-            except Exception: pass
+            except Exception as e:
+                logger.debug(f"清理 Page 句柄时发生异常: {e}")
         if context:
             try:
                 await asyncio.wait_for(context.close(), timeout=2.0)
-            except Exception: pass
+            except Exception as e:
+                logger.debug(f"清理 Context 句柄时发生异常: {e}")
             
     return valid_urls[:target_count], error_msg
