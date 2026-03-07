@@ -64,14 +64,14 @@ async def close_browser():
         if _browser:
             try:
                 await _browser.close()
-            except Exception as e:
+            except Exception:
                 pass
             finally:
                 _browser = None
         if _playwright_mgr:
             try:
                 await _playwright_mgr.stop()
-            except Exception as e:
+            except Exception:
                 pass
             finally:
                 _playwright_mgr = None
@@ -120,12 +120,16 @@ async def fetch_bing_image_urls(keyword: str, target_count: int) -> list[str]:
     while len(valid_urls) < target_count and pages_fetched < max_pages:
         pages_fetched += 1
         url = f"https://www.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={first}"
-        # 🚀 修复：将异常捕获置于循环内部，单页失败不影响大局 🚀
         try:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
+                    # 🚀 修复 HTTP 退避：遇到封禁则直接熔断，不再无效死锁 🚀
+                    if resp.status in (403, 429):
+                        logger.warning(f"Bing 触发 {resp.status} 反爬拦截，主动熔断。")
+                        break
                     first += 35
                     continue
+                    
                 html = await resp.text()
                 matches = re.findall(r'(?:"|&quot;)murl(?:"|&quot;)\s*:\s*(?:"|&quot;)(https?://[^\s"\'<>]+)(?:"|&quot;)', html)
                 new_found = 0
@@ -165,7 +169,8 @@ async def fetch_image_urls(keyword: str, target_count: int) -> tuple[list[str], 
         browser = await get_browser()
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            viewport={'width': 1920, 'height': 1080}
+            viewport={'width': 1920, 'height': 1080},
+            ignore_https_errors=True # 🚀 修复：无视野生站点的过期 SSL 证书 🚀
         )
         page = await context.new_page()
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
