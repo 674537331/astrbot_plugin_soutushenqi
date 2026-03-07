@@ -8,16 +8,26 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from astrbot.api import logger
 
 TILE_SIZE = 300
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 收紧防 OOM 阈值至 10MB
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  
 
 _composer_session = None
 _composer_session_lock = None
+# 🚀 修复：将局部下载锁提升为全局防 DDoS 锁 🚀
+_global_dl_semaphore = None
 
 async def _get_composer_lock():
     global _composer_session_lock
     if _composer_session_lock is None:
         _composer_session_lock = asyncio.Lock()
     return _composer_session_lock
+
+async def _get_dl_semaphore():
+    global _global_dl_semaphore
+    lock = await _get_composer_lock()
+    async with lock:
+        if _global_dl_semaphore is None:
+            _global_dl_semaphore = asyncio.Semaphore(10)
+    return _global_dl_semaphore
 
 async def get_composer_session() -> aiohttp.ClientSession:
     global _composer_session
@@ -37,6 +47,14 @@ async def close_composer_session():
 
 async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, url: str) -> Optional[bytes]:
     async with semaphore:
+        referer = "https://www.google.com/"
+        if 'baidu.com' in url or 'bdimg.com' in url:
+            referer = "https://image.baidu.com/"
+        elif 'duitang.com' in url:
+            referer = "https://www.duitang.com/"
+        elif 'bilibili.com' in url or 'hdslb.com' in url:
+            referer = "https://www.bilibili.com/"
+            
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
@@ -52,13 +70,12 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
                 if 'text/html' in content_type:
                     return None
                 
-                # 🚀 防 Tarpit 攻击：流式分块读取，超过物理容量直接强制掐断 🚀
                 chunks = []
                 downloaded_size = 0
-                async for chunk in resp.content.iter_chunked(1024 * 1024):  # 1MB 缓冲区块
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
                     downloaded_size += len(chunk)
                     if downloaded_size > MAX_IMAGE_SIZE:
-                        logger.warning(f"触发 OOM 防御：数据流超出 10MB 安全阈值，已强制阻断: {url}")
+                        logger.warning(f"触发 OOM 防御：数据流超出安全阈值: {url}")
                         return None
                     chunks.append(chunk)
                     
@@ -74,7 +91,7 @@ async def download_image(session: aiohttp.ClientSession, semaphore: asyncio.Sema
             return None
 
 async def download_image_batch(urls: list[str]) -> list[tuple[str, bytes]]:
-    semaphore = asyncio.Semaphore(10) 
+    semaphore = await _get_dl_semaphore()
     session = await get_composer_session()
     
     tasks = [download_image(session, semaphore, url) for url in urls]
@@ -91,7 +108,9 @@ def _create_collage_sync(items: list[tuple[str, bytes]]) -> tuple[Optional[bytes
             img = img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
             successful_images.append(img)
             valid_items.append((url, img_bytes))
-        except (IOError, UnidentifiedImageError):
+        except (IOError, UnidentifiedImageError) as e:
+            # 🚀 增加被吞噬的损坏数据日志 🚀
+            logger.debug(f"丢弃无法识别或损坏的图像数据 ({url}): {e}")
             continue
 
     if not successful_images:
