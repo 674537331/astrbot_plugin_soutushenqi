@@ -2,6 +2,12 @@
 
 🎨 基于大语言模型（LLM）与视觉大模型（VLM）的智能搜图插件。通过主图源 API 拦截与 Bing 备用图源的动态组合抓取，结合 VLM 的视觉语义筛选，为机器人提供准确度更高的图片搜索与百科配图能力。
 
+<div align="center">
+
+[![Moe Counter](https://count.getloli.com/get/@astrbot_plugin_soutushenqi?theme=moebooru)](https://github.com/674537331/astrbot_plugin_soutushenqi)
+
+</div>
+
 ## ✨ 核心特性
 
 ### 🖼️ 智能搜图与比对
